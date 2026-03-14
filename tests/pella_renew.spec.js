@@ -2,7 +2,7 @@
 const { test, chromium } = require('@playwright/test');
 const https = require('https');
 const http = require('http');
-const { execSync, spawn } = require('child_process');
+const { execSync } = require('child_process');
 
 // ── 账号配置 ────────────────────────────────────────────────
 const [PELLA_EMAIL, PELLA_PASSWORD] = (process.env.PELLA_ACCOUNT || ',').split(',');
@@ -10,45 +10,92 @@ const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
 const TIMEOUT = 120000;
 
-// ── 广告拦截脚本（最早注入，防止误触）───────────────────────
+// ── 广告拦截脚本（油猴 5.0 完整版，最早注入）────────────────
 const AD_BLOCK_SCRIPT = `
 (function() {
-    // 拦截广告脚本加载
-    const blockedDomains = ['madurird.com', 'crn77.com', 'fqjiujafk.com'];
+    'use strict';
+
+    // ===== document-start 阶段：拦截广告脚本加载 =====
+    const blockedScriptDomains = ['madurird.com', 'crn77.com', 'fqjiujafk.com'];
     new MutationObserver(mutations => {
         mutations.forEach(m => {
             m.addedNodes.forEach(node => {
                 if (node.tagName === 'SCRIPT' && node.src) {
-                    if (blockedDomains.some(d => node.src.includes(d))) {
+                    if (blockedScriptDomains.some(d => node.src.includes(d))) {
                         node.remove();
-                        console.log('[AdBlock] 拦截广告脚本:', node.src);
+                        console.log('[AdBlock] 已拦截广告脚本:', node.src);
                     }
                 }
             });
         });
     }).observe(document.documentElement, { childList: true, subtree: true });
 
-    // 阻止所有 window.open
-    window.open = () => null;
+    // ===== DOM 加载后执行 =====
+    function init() {
+        // 1. 阻止所有 window.open
+        window.open = () => null;
 
-    // 拦截广告链接点击
-    document.addEventListener('click', e => {
-        const a = e.target.closest('a');
-        if (!a) return;
-        const href = a.href || '';
-        if (
-            href.includes('crn77.com') ||
-            href.includes('madurird.com') ||
-            href.includes('tinyurl.com') ||
-            href.includes('popads') ||
-            href.includes('avnsgames.com') ||
-            href.includes('fqjiujafk.com')
-        ) {
-            e.stopPropagation();
-            e.preventDefault();
-            console.log('[AdBlock] 拦截广告链接:', href);
+        // 2. 拦截广告链接点击
+        document.addEventListener('click', e => {
+            const a = e.target.closest('a');
+            if (!a) return;
+            const href = a.href || '';
+            if (
+                href.includes('crn77.com') ||
+                href.includes('madurird.com') ||
+                href.includes('tinyurl.com') ||
+                href.includes('popads') ||
+                href.includes('avnsgames.com') ||
+                href.includes('fqjiujafk.com')
+            ) {
+                e.stopPropagation();
+                e.preventDefault();
+                console.log('[AdBlock] 拦截广告链接:', href);
+            }
+        }, true);
+
+        // 3. 持续清理广告元素
+        function removeAds() {
+            // 移除按钮上的广告 onclick
+            document.querySelector('#continue')?.removeAttribute('onclick');
+            document.querySelector('#submit-button')?.removeAttribute('onclick');
+            document.querySelector('#getnewlink')?.removeAttribute('onclick');
+            document.querySelectorAll('[onclick*="crn77"],[onclick*="madurird"]').forEach(el => el.removeAttribute('onclick'));
+
+            // 移除广告链接
+            document.querySelectorAll([
+                'a[href*="crn77.com"]',
+                'a[href*="madurird.com"]',
+                'a[href*="tinyurl.com"]',
+                'a[href*="avnsgames.com"]',
+                'a[href*="popads"]',
+                'script[src*="madurird.com"]',
+                'script[src*="fqjiujafk.com"]',
+            ].join(',')).forEach(el => el.remove());
+
+            // 移除所有 netpub 广告元素
+            document.querySelectorAll([
+                'iframe[id*="netpub"]',
+                'div[id*="netpub_ins"]',
+                'div[id*="netpub_banner"]',
+                'div[class*="eldhywa"]',
+                'iframe[height="0"]',
+                'iframe[style*="display: none"]'
+            ].join(',')).forEach(el => el.remove());
         }
-    }, true);
+
+        removeAds();
+        new MutationObserver(removeAds).observe(document.documentElement, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
 })();
 `;
 
@@ -127,7 +174,6 @@ function xdotoolClick(x, y) {
     x = Math.round(x);
     y = Math.round(y);
     try {
-        // 激活 chrome 窗口
         const wids = execSync('xdotool search --onlyvisible --class chrome', { timeout: 3000 })
             .toString().trim().split('\n').filter(Boolean);
         if (wids.length > 0) {
@@ -146,7 +192,7 @@ function xdotoolClick(x, y) {
 }
 
 // ── 获取窗口偏移量 ──────────────────────────────────────────
-function getWindowOffset(page) {
+async function getWindowOffset(page) {
     try {
         const wids = execSync('xdotool search --onlyvisible --class chrome', { timeout: 3000 })
             .toString().trim().split('\n').filter(Boolean);
@@ -159,18 +205,16 @@ function getWindowOffset(page) {
             });
             const winX = geoDict['X'] || 0;
             const winY = geoDict['Y'] || 0;
-            return page.evaluate(`(function(){ return { outer: window.outerHeight, inner: window.innerHeight }; })()`).then(info => {
-                let toolbar = info.outer - info.inner;
-                if (toolbar < 30 || toolbar > 200) toolbar = 87;
-                return { winX, winY, toolbar };
-            });
+            const info = await page.evaluate('(function(){ return { outer: window.outerHeight, inner: window.innerHeight }; })()');
+            let toolbar = info.outer - info.inner;
+            if (toolbar < 30 || toolbar > 200) toolbar = 87;
+            return { winX, winY, toolbar };
         }
     } catch (e) {}
-    return page.evaluate(`(function(){ return { screenX: window.screenX||0, screenY: window.screenY||0, outer: window.outerHeight, inner: window.innerHeight }; })()`).then(info => {
-        let toolbar = info.outer - info.inner;
-        if (toolbar < 30 || toolbar > 200) toolbar = 87;
-        return { winX: info.screenX, winY: info.screenY, toolbar };
-    });
+    const info = await page.evaluate('(function(){ return { screenX: window.screenX||0, screenY: window.screenY||0, outer: window.outerHeight, inner: window.innerHeight }; })()');
+    let toolbar = info.outer - info.inner;
+    if (toolbar < 30 || toolbar > 200) toolbar = 87;
+    return { winX: info.screenX, winY: info.screenY, toolbar };
 }
 
 // ── CF Turnstile 坐标获取 ────────────────────────────────────
@@ -219,7 +263,6 @@ async function checkCFToken(page) {
 
 // ── 处理 CF Turnstile ────────────────────────────────────────
 async function solveTurnstile(page) {
-    // 展开可能被 overflow:hidden 遮住的容器
     await page.evaluate(`
         (function() {
             var turnstileInput = document.querySelector('input[name="cf-turnstile-response"]');
@@ -235,24 +278,20 @@ async function solveTurnstile(page) {
         })()
     `);
 
-    // 注入 token 监听器
     await page.evaluate(CF_TOKEN_LISTENER_JS);
     console.log('📡 开始监控 Cloudflare Turnstile Token...');
 
-    // 检查是否已自动通过
     if (await checkCFToken(page)) {
         console.log('✅ 验证已自动通过');
         return true;
     }
 
-    // 滚动到验证控件
     await page.evaluate(`
         var c = document.querySelector('.cf-turnstile');
         if (c) c.scrollIntoView({ behavior: 'smooth', block: 'center' });
     `);
     await sleep(1500);
 
-    // 获取坐标
     const coords = await getTurnstileCoords(page);
     if (!coords) {
         console.log('❌ 验证坐标获取失败');
@@ -266,7 +305,6 @@ async function solveTurnstile(page) {
     console.log('📐 坐标计算完成');
     xdotoolClick(absX, absY);
 
-    // 轮询等待 token（最多 30 秒）
     for (let i = 0; i < 60; i++) {
         await sleep(500);
         if (await checkCFToken(page)) {
@@ -285,7 +323,6 @@ async function solveTurnstile(page) {
 async function handleFitnesstipz(page) {
     console.log(`  📄 fitnesstipz 中转页: ${page.url()}`);
 
-    // 点击 Continue... 触发倒计时
     try {
         await page.waitForSelector('p.getmylink', { timeout: 10000 });
         await page.click('p.getmylink');
@@ -294,7 +331,6 @@ async function handleFitnesstipz(page) {
         console.log(`  ⚠️ getmylink 未找到：${e.message}`);
     }
 
-    // 等待 #newtimer 消失（倒计时结束）
     console.log('  ⏳ 等待倒计时结束...');
     for (let i = 0; i < 60; i++) {
         await sleep(1000);
@@ -310,14 +346,11 @@ async function handleFitnesstipz(page) {
             console.log('  ✅ 倒计时结束');
             break;
         }
-        if (i === 59) {
-            console.log('  ⚠️ 倒计时等待超时');
-        }
+        if (i === 59) console.log('  ⚠️ 倒计时等待超时');
     }
 
     await sleep(1000);
 
-    // 点击 Continue... 跳转到文章底部
     try {
         await page.click('span.wp2continuelink');
         console.log('  ✅ 已点击 wp2continuelink');
@@ -326,11 +359,9 @@ async function handleFitnesstipz(page) {
         console.log(`  ⚠️ wp2continuelink 未找到：${e.message}`);
     }
 
-    // 滚动到底部
     await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
     await sleep(1000);
 
-    // 点击 Get Link
     try {
         await page.waitForSelector('#getnewlink', { timeout: 10000 });
         await page.click('#getnewlink');
@@ -373,15 +404,12 @@ test('Pella 自动续期', async () => {
     // ── 启动浏览器 ───────────────────────────────────────────
     console.log('🔧 启动浏览器...');
     const browser = await chromium.launch({
-        headless: false, // xvfb 环境下用 false
+        headless: false,
         proxy: proxyConfig,
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
     const context = await browser.newContext();
-
-    // 全局注入广告拦截脚本
     await context.addInitScript(AD_BLOCK_SCRIPT);
-
     const page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
     console.log('🚀 浏览器就绪！');
@@ -449,12 +477,10 @@ test('Pella 自动续期', async () => {
         if (servers.length === 0) throw new Error('❌ 未找到服务器');
 
         let renewLink = null;
-        let serverId = null;
         for (const server of servers) {
             const unclaimed = (server.renew_links || []).filter(l => l.claimed === false);
             if (unclaimed.length > 0) {
                 renewLink = unclaimed[0].link;
-                serverId = server.id;
                 console.log(`✅ 找到续期链接: ${renewLink} (服务器 ${server.ip})`);
                 break;
             }
@@ -529,7 +555,6 @@ test('Pella 自动续期', async () => {
                 if (i % 5 === 0) console.log(`  ⏳ 剩余 ${timerVal} 秒...`);
             }
 
-            // 获取 Get Link 的 href（renew ID 在这里）
             console.log('🔍 获取 renew 链接...');
             const renewHref = await page.evaluate(`
                 (function(){
@@ -541,12 +566,10 @@ test('Pella 自动续期', async () => {
             if (!renewHref || !renewHref.includes('/renew/')) {
                 await page.screenshot({ path: 'no_renew_href.png' });
                 await sendTG('❌ 未找到 renew 链接');
-                throw new Error(`❌ 未找到有效 renew 链接: ${renewHref}`);
+                throw new Error('❌ 未找到有效 renew 链接: ' + renewHref);
             }
 
             console.log(`✅ 找到 renew 链接: ${renewHref}`);
-
-            // 点击 Get Link
             await page.click('a.btn.btn-success.btn-lg.get-link');
             await sleep(3000);
             console.log(`📄 跳转后: ${page.url()}`);
@@ -570,7 +593,7 @@ test('Pella 自动续期', async () => {
             await sendTG('✅ 续期成功！');
         } else {
             console.log(`⚠️ 续期结果未知: ${finalUrl}`);
-            await sendTG(`⚠️ 续期结果未知`, `🔗 最终URL: ${finalUrl}`);
+            await sendTG('⚠️ 续期结果未知', `🔗 最终URL: ${finalUrl}`);
         }
 
     } catch (e) {
