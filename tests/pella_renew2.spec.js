@@ -177,53 +177,7 @@ function sendTG(result, extra = '') {
     });
 }
 
-// ── xdotool 点击绝对坐标 ────────────────────────────────────
-function xdotoolClick(x, y) {
-    x = Math.round(x);
-    y = Math.round(y);
-    try {
-        const wids = execSync('xdotool search --onlyvisible --class chrome', { timeout: 3000 })
-            .toString().trim().split('\n').filter(Boolean);
-        if (wids.length > 0) {
-            execSync(`xdotool windowactivate ${wids[wids.length - 1]}`, { timeout: 2000, stdio: 'ignore' });
-            execSync('sleep 0.2', { stdio: 'ignore' });
-        }
-        execSync(`xdotool mousemove ${x} ${y}`, { timeout: 2000 });
-        execSync('sleep 0.15', { stdio: 'ignore' });
-        execSync('xdotool click 1', { timeout: 2000 });
-        console.log(`📐 xdotool 点击成功: (${x}, ${y})`);
-        return true;
-    } catch (e) {
-        console.log(`⚠️ xdotool 点击失败：${e.message}`);
-        return false;
-    }
-}
 
-// ── 获取窗口偏移量 ──────────────────────────────────────────
-async function getWindowOffset(page) {
-    try {
-        const wids = execSync('xdotool search --onlyvisible --class chrome', { timeout: 3000 })
-            .toString().trim().split('\n').filter(Boolean);
-        if (wids.length > 0) {
-            const geo = execSync(`xdotool getwindowgeometry --shell ${wids[wids.length - 1]}`, { timeout: 3000 }).toString();
-            const geoDict = {};
-            geo.trim().split('\n').forEach(line => {
-                const [k, v] = line.split('=');
-                if (k && v) geoDict[k.trim()] = parseInt(v.trim());
-            });
-            const winX = geoDict['X'] || 0;
-            const winY = geoDict['Y'] || 0;
-            const info = await page.evaluate('(function(){ return { outer: window.outerHeight, inner: window.innerHeight }; })()');
-            let toolbar = info.outer - info.inner;
-            if (toolbar < 30 || toolbar > 200) toolbar = 87;
-            return { winX, winY, toolbar };
-        }
-    } catch (e) {}
-    const info = await page.evaluate('(function(){ return { screenX: window.screenX||0, screenY: window.screenY||0, outer: window.outerHeight, inner: window.innerHeight }; })()');
-    let toolbar = info.outer - info.inner;
-    if (toolbar < 30 || toolbar > 200) toolbar = 87;
-    return { winX: info.screenX, winY: info.screenY, toolbar };
-}
 
 // ── CF Turnstile 坐标获取 ────────────────────────────────────
 async function getTurnstileCoords(page) {
