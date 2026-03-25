@@ -95,11 +95,11 @@ function sendTG(result, extra = '') {
         if (!TG_CHAT_ID || !TG_TOKEN) return resolve();
         const body = JSON.stringify({ 
             chat_id: TG_CHAT_ID, 
-            text: \`🎮 Pella 续期通知\\n🕐 时间: \${nowStr()}\\n📊 结果: \${result}\${extra ? '\\n📝 ' + extra : ''}\` 
+            text: `🎮 Pella 续期通知\n🕐 时间: ${nowStr()}\n📊 结果: ${result}${extra ? '\n📝 ' + extra : ''}` 
         });
         const req = https.request({
             hostname: 'api.telegram.org',
-            path: \`/bot\${TG_TOKEN}/sendMessage\`,
+            path: `/bot${TG_TOKEN}/sendMessage`,
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
         }, () => resolve());
@@ -135,13 +135,10 @@ async function solveTurnstile(page) {
     // 2. 尝试使用 Playwright 原生方法点击 CF iframe
     try {
         console.log('👆 尝试使用 Playwright 原生点击...');
-        // 找到 CF 的 iframe 容器
         const frameElement = await page.waitForSelector('.cf-turnstile iframe, iframe[src*="turnstile"]', { timeout: 5000 });
         if (frameElement) {
-            // 将元素滚动到视图中央以确保可点击
             await frameElement.scrollIntoViewIfNeeded();
             await sleep(500);
-            // 模拟真实人类的点击延迟
             await frameElement.click({ delay: 150 }); 
         }
     } catch (e) {
@@ -152,7 +149,7 @@ async function solveTurnstile(page) {
     for (let i = 0; i < 40; i++) {
         await sleep(1000);
         if (await checkCFToken(page)) {
-            console.log(`✅ Cloudflare Turnstile 验证通过！`);
+            console.log('✅ Cloudflare Turnstile 验证通过！');
             return true;
         }
     }
