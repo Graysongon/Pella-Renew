@@ -8,37 +8,32 @@ const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
 const TIMEOUT = 180000;
 
-// ── 广告拦截与防检测 ────────────────────────────────────────
-const AD_BLOCK_SCRIPT = `
+// ── 核心破解脚本：强制激活 cuttlinks 按钮 ──────────────────
+const CUTTLINKS_BYPASS_JS = `
 (function() {
     'use strict';
-    // 屏蔽干扰脚本
-    const blocked = ['madurird.com', 'crn77.com', 'fqjiujafk.com', 'popads', 'avnsgames.com', 'mshcdn.com'];
-    new MutationObserver(mutations => {
-        mutations.forEach(m => {
-            m.addedNodes.forEach(node => {
-                if (node.tagName === 'SCRIPT' && node.src) {
-                    if (blocked.some(d => node.src.includes(d))) node.remove();
-                }
+    // 自动移除所有覆盖层和广告弹窗
+    const removeOverlays = () => {
+        document.querySelectorAll('div[class*="overlay"], div[id*="pop"], iframe[src*="googlead"]').forEach(el => el.remove());
+    };
+
+    // 强制激活所有可能的“下一步”按钮
+    const activateButtons = () => {
+        const selectors = ['#continue', '#getnewlink', 'a.get-link', '.btn-success', '.wp2continuelink', 'button[type="submit"]'];
+        selectors.forEach(s => {
+            document.querySelectorAll(s).forEach(el => {
+                el.style.display = 'block !important';
+                el.style.visibility = 'visible !important';
+                el.style.pointerEvents = 'auto !important';
+                el.classList.remove('disabled');
             });
         });
-    }).observe(document.documentElement, { childList: true, subtree: true });
+    };
 
-    window.open = () => null; // 彻底禁止新窗口弹窗
-    
-    // 强制显示并激活按钮
+    window.open = () => null; // 禁用弹窗跳转
     setInterval(() => {
-        const selectors = ['a.get-link', '#get-link', '.btn-success', '#continue', '#getnewlink', '.wp2continuelink'];
-        selectors.forEach(s => {
-            const el = document.querySelector(s);
-            if (el) {
-                el.style.display = 'block';
-                el.style.visibility = 'visible';
-                el.style.pointerEvents = 'auto';
-                el.style.opacity = '1';
-                el.classList.remove('disabled');
-            }
-        });
+        removeOverlays();
+        activateButtons();
     }, 1000);
 })();
 `;
@@ -65,7 +60,6 @@ function sendTG(result, extra = '') {
             headers: { 'Content-Type': 'application/json' },
         }, () => resolve());
         req.on('error', () => resolve());
-        req.setTimeout(8000, () => resolve());
         req.write(body);
         req.end();
     });
@@ -79,10 +73,7 @@ async function solveTurnstile(page) {
 
     try {
         const frame = await page.waitForSelector('iframe[src*="turnstile"]', { timeout: 8000 });
-        if (frame) {
-            await frame.click();
-            console.log('👆 已尝试手动触发 CF 验证框');
-        }
+        if (frame) await frame.click();
     } catch (e) {}
 
     for (let i = 0; i < 30; i++) {
@@ -111,7 +102,7 @@ test('Pella 自动续期', async () => {
     });
     
     await context.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
-    await context.addInitScript(AD_BLOCK_SCRIPT);
+    await context.addInitScript(CUTTLINKS_BYPASS_JS);
     
     const page = await context.newPage();
 
@@ -124,11 +115,10 @@ test('Pella 自动续期', async () => {
         await page.waitForSelector('input[name="password"]', { timeout: 15000 });
         await page.fill('input[name="password"]', PELLA_PASSWORD);
         await page.keyboard.press('Enter');
-        
         await page.waitForURL(/pella\.app\/(home|dashboard)/, { timeout: 30000 });
         console.log('✅ 登录成功');
 
-        // 2. 获取续期链接
+        // 2. 筛选 cuttlinks 续期链接
         await sleep(3000);
         const token = await page.evaluate('window.Clerk.session.getToken()');
         const res = await page.evaluate(async (t) => {
@@ -137,25 +127,26 @@ test('Pella 自动续期', async () => {
         }, token);
 
         let renewLink = null;
+        // 优先寻找包含 cuttlinks.com 的链接，如果没有则取第一个未领取的
         for (const s of (res.servers || [])) {
-            const link = (s.renew_links || []).find(l => !l.claimed);
-            if (link) { renewLink = link.link; break; }
+            const links = s.renew_links || [];
+            const target = links.find(l => !l.claimed && l.link.includes('cuttlinks.com')) || links.find(l => !l.claimed);
+            if (target) { renewLink = target.link; break; }
         }
 
         if (!renewLink) {
-            console.log('⚠️ 今日无需续期');
+            console.log('⚠️ 今日无需续期或未找到匹配链接');
             return;
         }
 
-        console.log(`🌐 访问续期链接: ${renewLink}`);
+        console.log(`🌐 访问目标链接: ${renewLink}`);
 
-        // 监听最终目标 URL
-        let capturedRenewUrl = null;
-        page.on('request', request => {
-            const url = request.url();
-            if (url.includes('pella.app/renew/')) {
-                capturedRenewUrl = url;
-                console.log('📡 监听到目标 URL: ' + url);
+        // 📡 开启网络嗅探
+        let capturedUrl = null;
+        page.on('request', req => {
+            if (req.url().includes('pella.app/renew/')) {
+                capturedUrl = req.url();
+                console.log('🎯 捕获到重定向 URL: ' + capturedUrl);
             }
         });
 
@@ -163,59 +154,51 @@ test('Pella 自动续期', async () => {
 
         // 3. 处理 CF 验证
         if (await page.$('input[name="cf-turnstile-response"]')) {
-            console.log('🛡️ 处理 CF 验证...');
+            console.log('🛡️ 处理 Cloudflare...');
             await solveTurnstile(page);
         }
 
-        // 4. 处理广告页跳转逻辑 (针对 cuttlinks / tpi / fitnesstipz)
-        console.log('⏳ 监控跳转过程中...');
-        
-        for (let i = 0; i < 60; i++) {
-            if (capturedRenewUrl) {
-                console.log('🚀 捕获到目标链接，执行最终跳转');
-                await page.goto(capturedRenewUrl);
+        // 4. 暴力循环点击逻辑 (核心适配 cuttlinks)
+        console.log('⏳ 开始执行穿透点击...');
+        for (let i = 0; i < 50; i++) {
+            if (capturedUrl) {
+                console.log('🚀 正在跳转至最终续期地址...');
+                await page.goto(capturedUrl);
                 break;
             }
 
-            // 暴力重复点击逻辑
+            // 在页面执行重复点击策略
             await page.evaluate(() => {
-                const selectors = [
-                    '#continue', '#getnewlink', 'a.get-link', 
-                    '.btn-success', 'p.getmylink', 'span.wp2continuelink',
-                    'a[href*="cuttlinks.com"]', 'button'
-                ];
-                selectors.forEach(s => {
-                    const elements = document.querySelectorAll(s);
-                    elements.forEach(el => {
-                        // 检查可点击性并执行重复点击
-                        const style = window.getComputedStyle(el);
-                        if (style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none') {
-                            el.click();
-                        }
-                    });
+                const btnSelectors = ['#continue', '#getnewlink', 'a.get-link', '.btn-success', '.wp2continuelink'];
+                btnSelectors.forEach(s => {
+                    const el = document.querySelector(s);
+                    if (el && !el.classList.contains('disabled')) {
+                        el.click(); // 执行点击
+                    }
                 });
+                // 强制尝试调用潜在的跳转函数
                 if (typeof window.get_link === 'function') window.get_link();
             }).catch(() => {});
 
             if (page.url().includes('pella.app/renew/')) break;
-            
-            await sleep(1500);
-            if (i % 10 === 0) console.log(`   ⏱️ 等待中... 当前地址: ${page.url()}`);
+
+            await sleep(2000);
+            if (i % 5 === 0) console.log(`   ⏱️ 状态确认: ${page.url()}`);
         }
 
-        // 5. 验证结果
+        // 5. 最终验证
         await page.waitForURL(/pella\.app\/renew\//, { timeout: 15000 }).catch(() => {});
         if (page.url().includes('/renew/')) {
-            console.log('🎉 续期成功！');
-            await sendTG('✅ 续期成功！');
+            console.log('🎉 恭喜，续期任务圆满完成！');
+            await sendTG('✅ 续期动作成功 (cuttlinks 路径)');
         } else {
-            throw new Error('未到达最终页面，当前 URL: ' + page.url());
+            throw new Error('未能到达目的地，当前停留在: ' + page.url());
         }
 
     } catch (e) {
         await page.screenshot({ path: 'error.png' });
-        console.error(`❌ 故障: ${e.message}`);
-        await sendTG(`❌ 续期失败: ${e.message}`);
+        console.error(`❌ 错误详情: ${e.message}`);
+        await sendTG(`❌ 续期异常: ${e.message}`);
         throw e;
     } finally {
         await browser.close();
