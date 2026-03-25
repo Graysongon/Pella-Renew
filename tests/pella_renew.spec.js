@@ -7,9 +7,10 @@ const http = require('http');
 const [PELLA_EMAIL, PELLA_PASSWORD] = (process.env.PELLA_ACCOUNT || ',').split(',');
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
-const TIMEOUT = 120000;
+// 增加总超时时间到 180 秒，防止网络波动导致超时
+const TIMEOUT = 180000;
 
-// ── 广告拦截脚本（保留你原本的强力版本）──────────────────────
+// ── 广告拦截脚本（油猴 5.0 增强版）──────────────────────────
 const AD_BLOCK_SCRIPT = `
 (function() {
     'use strict';
@@ -45,9 +46,8 @@ const AD_BLOCK_SCRIPT = `
             document.querySelectorAll('[onclick*="crn77"],[onclick*="madurird"]').forEach(el => el.removeAttribute('onclick'));
         }
         removeAds();
-        setInterval(removeAds, 1000);
+        setInterval(removeAds, 1500);
     }
-
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
@@ -66,7 +66,6 @@ const CF_TOKEN_LISTENER_JS = `
         if (!e.origin || !e.origin.includes('cloudflare.com')) return;
         var d = e.data;
         if (!d || d.event !== 'complete' || !d.token) return;
-        console.log('[TokenCapture] token 获取成功');
         window.__cf_turnstile_token__ = d.token;
         var inputs = document.querySelectorAll('input[name="cf-turnstile-response"]');
         for (var i = 0; i < inputs.length; i++) {
@@ -104,7 +103,7 @@ function sendTG(result, extra = '') {
             headers: { 'Content-Type': 'application/json' },
         }, () => resolve());
         req.on('error', () => resolve());
-        req.setTimeout(5000, () => resolve());
+        req.setTimeout(8000, () => resolve());
         req.write(body);
         req.end();
     });
@@ -120,48 +119,33 @@ async function checkCFToken(page) {
     });
 }
 
-// ── 处理 CF Turnstile（原生点击 + 监听）─────────────────────
+// ── 处理 CF Turnstile ────────────────────────────────────────
 async function solveTurnstile(page) {
     await page.evaluate(CF_TOKEN_LISTENER_JS);
-    console.log('📡 开始监控 Cloudflare Turnstile...');
-
-    // 1. 先等待看是否能自动通过（如果 IP 质量好，CF 会直接给绿勾）
     await sleep(2000);
-    if (await checkCFToken(page)) {
-        console.log('✅ 验证已自动通过 (免点击)');
-        return true;
-    }
+    if (await checkCFToken(page)) return true;
 
-    // 2. 尝试使用 Playwright 原生方法点击 CF iframe
     try {
-        console.log('👆 尝试使用 Playwright 原生点击...');
-        const frameElement = await page.waitForSelector('.cf-turnstile iframe, iframe[src*="turnstile"]', { timeout: 5000 });
-        if (frameElement) {
-            await frameElement.scrollIntoViewIfNeeded();
-            await sleep(500);
-            await frameElement.click({ delay: 150 }); 
+        const frame = await page.waitForSelector('.cf-turnstile iframe, iframe[src*="turnstile"]', { timeout: 8000 });
+        if (frame) {
+            await frame.scrollIntoViewIfNeeded();
+            await sleep(1000);
+            await frame.click({ delay: 200 }); 
         }
     } catch (e) {
-        console.log('⚠️ 未找到可点击的 CF iframe 框，可能已被隐藏或结构改变');
+        console.log('⚠️ CF 点击失败，尝试等待自动通过...');
     }
 
-    // 3. 轮询检查 Token
     for (let i = 0; i < 40; i++) {
         await sleep(1000);
-        if (await checkCFToken(page)) {
-            console.log('✅ Cloudflare Turnstile 验证通过！');
-            return true;
-        }
+        if (await checkCFToken(page)) return true;
     }
-
-    console.log('❌ CF 验证超时失败');
-    await page.screenshot({ path: 'cf_turnstile_failed.png' });
     return false;
 }
 
 // ── 处理 fitnesstipz 中转页 ──────────────────────────────────
 async function handleFitnesstipz(page) {
-    console.log(`  📄 fitnesstipz 中转: ${page.url()}`);
+    console.log(`  📄 中转页: ${page.url()}`);
     try {
         await page.waitForSelector('p.getmylink', { timeout: 10000 });
         await page.click('p.getmylink');
@@ -169,19 +153,19 @@ async function handleFitnesstipz(page) {
 
     for (let i = 0; i < 60; i++) {
         await sleep(1000);
-        const timerHidden = await page.evaluate(() => {
+        const hidden = await page.evaluate(() => {
             const el = document.querySelector('#newtimer');
             return !el || window.getComputedStyle(el).display === 'none';
         });
-        if (timerHidden) break;
+        if (hidden) break;
     }
 
-    try { await page.click('span.wp2continuelink'); } catch (e) {}
-    await sleep(1500);
+    try { await page.click('span.wp2continuelink', { force: true }); } catch (e) {}
+    await sleep(2000);
 
     try {
         await page.waitForSelector('#getnewlink', { timeout: 10000 });
-        await page.click('#getnewlink');
+        await page.click('#getnewlink', { force: true });
         return true;
     } catch (e) {
         return false;
@@ -190,70 +174,52 @@ async function handleFitnesstipz(page) {
 
 // ── 主测试 ──────────────────────────────────────────────────
 test('Pella 自动续期', async () => {
-    if (!PELLA_EMAIL || !PELLA_PASSWORD) throw new Error('缺少账号配置');
+    test.setTimeout(TIMEOUT);
+    if (!PELLA_EMAIL || !PELLA_PASSWORD) throw new Error('配置缺失');
 
-    let proxyConfig = undefined;
-    if (process.env.GOST_PROXY) {
-        proxyConfig = { server: 'http://127.0.0.1:8080' };
-        console.log('🛡️ 使用 GOST 代理');
-    }
+    let proxyConfig = process.env.GOST_PROXY ? { server: 'http://127.0.0.1:8080' } : undefined;
 
     const browser = await chromium.launch({
-        headless: true, // CI 环境推荐直接使用 true
+        headless: true,
         proxy: proxyConfig,
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox',
-            '--disable-blink-features=AutomationControlled', // 核心防检测
-            '--window-size=1920,1080'
-        ],
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
     });
 
     const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 }
     });
     
-    // 注入彻底擦除 webdriver 特征的脚本
-    await context.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
+    await context.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
     await context.addInitScript(AD_BLOCK_SCRIPT);
     
     const page = await context.newPage();
-    page.setDefaultTimeout(TIMEOUT);
 
     try {
         console.log('🔑 登录 Pella...');
-        await page.goto('https://www.pella.app/login', { waitUntil: 'domcontentloaded' });
+        await page.goto('https://www.pella.app/login', { waitUntil: 'networkidle' });
         await page.fill('#identifier-field', PELLA_EMAIL);
-        await page.click('span.cl-internal-2iusy0');
-        await page.waitForSelector('input[name="password"]');
+        await page.click('button.cl-formButtonPrimary', { timeout: 10000 }).catch(() => page.click('span.cl-internal-2iusy0'));
+        
+        await page.waitForSelector('input[name="password"]', { timeout: 15000 });
         await page.fill('input[name="password"]', PELLA_PASSWORD);
-        await page.click('span.cl-internal-2iusy0');
+        await page.click('button.cl-formButtonPrimary', { timeout: 10000 }).catch(() => page.click('span.cl-internal-2iusy0'));
         
         await page.waitForURL(/pella\.app\/(home|dashboard)/, { timeout: 30000 });
         console.log('✅ 登录成功');
 
-        for (let i = 0; i < 20; i++) {
-            if (await page.evaluate('!!(window.Clerk && window.Clerk.session)')) break;
-            await sleep(500);
-        }
-
+        // 获取 Token 并请求服务器列表
+        await sleep(3000);
         const token = await page.evaluate('window.Clerk.session.getToken()');
-        const serversRes = await page.evaluate(async (t) => {
-            const res = await fetch('https://api.pella.app/user/servers', {
-                headers: { 'Authorization': `Bearer ${t}` }
-            });
-            return res.json();
+        const res = await page.evaluate(async (t) => {
+            const r = await fetch('https://api.pella.app/user/servers', { headers: { 'Authorization': `Bearer ${t}` } });
+            return r.json();
         }, token);
 
         let renewLink = null;
-        for (const server of (serversRes.servers || [])) {
-            const unclaimed = (server.renew_links || []).filter(l => !l.claimed);
-            if (unclaimed.length > 0) {
-                renewLink = unclaimed[0].link;
-                break;
-            }
+        for (const s of (res.servers || [])) {
+            const link = (s.renew_links || []).find(l => !l.claimed);
+            if (link) { renewLink = link.link; break; }
         }
 
         if (!renewLink) {
@@ -261,51 +227,59 @@ test('Pella 自动续期', async () => {
             return;
         }
 
-        console.log(`🌐 访问广告链接: ${renewLink}`);
+        console.log(`🌐 访问续期链接: ${renewLink}`);
         await page.goto(renewLink, { waitUntil: 'domcontentloaded' });
 
+        // 处理 CF 验证
         if (await page.$('input[name="cf-turnstile-response"]')) {
-            const cfOk = await solveTurnstile(page);
-            if (!cfOk) throw new Error('❌ CF Turnstile 验证失败');
+            console.log('🛡️ 检测到 CF，处理中...');
+            if (!await solveTurnstile(page)) throw new Error('CF 验证失败');
+            console.log('✅ CF 验证通过');
         }
 
+        // 处理中转页逻辑
         try {
             await page.waitForSelector('#continue', { timeout: 10000 });
-            await page.click('#continue');
-            await sleep(3000);
+            await page.click('#continue', { force: true });
         } catch (e) {}
 
-        let loopCount = 0;
-        while (page.url().includes('fitnesstipz.com') && loopCount < 5) {
-            loopCount++;
-            if (!await handleFitnesstipz(page)) throw new Error('❌ 中转页失败');
+        let loop = 0;
+        while (page.url().includes('fitnesstipz.com') && loop < 5) {
+            loop++;
+            if (!await handleFitnesstipz(page)) throw new Error('中转页处理超时');
             await sleep(3000);
         }
 
+        // 处理 tpi.li 最终页
         if (page.url().includes('tpi.li')) {
-            console.log('⏳ 等待 tpi.li...');
-            for (let i = 0; i < 60; i++) {
+            console.log('⏳ 正在处理 tpi.li 倒计时...');
+            let clicked = false;
+            for (let i = 0; i < 45; i++) {
                 await sleep(1000);
-                const t = await page.evaluate(() => document.querySelector('#timer')?.textContent?.trim());
-                if (parseInt(t || '0') <= 0) break;
+                const isReady = await page.evaluate(() => {
+                    const btn = document.querySelector('a.btn.btn-success.btn-lg.get-link');
+                    return btn && !btn.classList.contains('disabled') && window.getComputedStyle(btn).display !== 'none';
+                });
+                if (isReady) {
+                    await page.click('a.btn.btn-success.btn-lg.get-link', { force: true });
+                    clicked = true;
+                    break;
+                }
             }
-            await page.click('a.btn.btn-success.btn-lg.get-link');
-            await sleep(3000);
+            if (!clicked) throw new Error('tpi.li 按钮未就绪');
         }
 
-        await page.waitForURL(/pella\.app\/renew\//, { timeout: 15000 }).catch(() => {});
-        const finalUrl = page.url();
-        
-        if (finalUrl.includes('/renew/')) {
+        await page.waitForURL(/pella\.app\/renew\//, { timeout: 20000 }).catch(() => {});
+        if (page.url().includes('/renew/')) {
             console.log('🎉 续期成功！');
             await sendTG('✅ 续期成功！');
         } else {
-            console.log(`⚠️ 续期未知: ${finalUrl}`);
-            await sendTG('⚠️ 续期结果未知', finalUrl);
+            throw new Error('未到达最终续期页面: ' + page.url());
         }
 
     } catch (e) {
-        await page.screenshot({ path: 'error.png' }).catch(() => {});
+        await page.screenshot({ path: 'error.png' });
+        console.error(`❌ 错误: ${e.message}`);
         await sendTG(`❌ 脚本异常: ${e.message}`);
         throw e;
     } finally {
