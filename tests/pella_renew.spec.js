@@ -12,7 +12,7 @@ const TIMEOUT = 180000;
 const AD_BLOCK_SCRIPT = `
 (function() {
     'use strict';
-    // 屏蔽已知的广告和干扰脚本
+    // 屏蔽干扰脚本
     const blocked = ['madurird.com', 'crn77.com', 'fqjiujafk.com', 'popads', 'avnsgames.com', 'mshcdn.com'];
     new MutationObserver(mutations => {
         mutations.forEach(m => {
@@ -24,15 +24,21 @@ const AD_BLOCK_SCRIPT = `
         });
     }).observe(document.documentElement, { childList: true, subtree: true });
 
-    window.open = () => null; // 彻底禁止弹窗
-    // 强制显示被隐藏的 Get Link 按钮
+    window.open = () => null; // 彻底禁止新窗口弹窗
+    
+    // 强制显示并激活按钮
     setInterval(() => {
-        const btn = document.querySelector('a.get-link, #get-link, .btn-success');
-        if (btn) {
-            btn.style.display = 'block !important';
-            btn.style.visibility = 'visible !important';
-            btn.classList.remove('disabled');
-        }
+        const selectors = ['a.get-link', '#get-link', '.btn-success', '#continue', '#getnewlink', '.wp2continuelink'];
+        selectors.forEach(s => {
+            const el = document.querySelector(s);
+            if (el) {
+                el.style.display = 'block';
+                el.style.visibility = 'visible';
+                el.style.pointerEvents = 'auto';
+                el.style.opacity = '1';
+                el.classList.remove('disabled');
+            }
+        });
     }, 1000);
 })();
 `;
@@ -75,7 +81,7 @@ async function solveTurnstile(page) {
         const frame = await page.waitForSelector('iframe[src*="turnstile"]', { timeout: 8000 });
         if (frame) {
             await frame.click();
-            console.log('👆 已手动点击 CF 验证框');
+            console.log('👆 已尝试手动触发 CF 验证框');
         }
     } catch (e) {}
 
@@ -143,7 +149,7 @@ test('Pella 自动续期', async () => {
 
         console.log(`🌐 访问续期链接: ${renewLink}`);
 
-        // 🎯 核心增强：开启请求监听，捕获所有重定向和跳转
+        // 监听最终目标 URL
         let capturedRenewUrl = null;
         page.on('request', request => {
             const url = request.url();
@@ -161,35 +167,36 @@ test('Pella 自动续期', async () => {
             await solveTurnstile(page);
         }
 
-        // 4. 处理 cuttlinks.com / fitnesstipz 混合跳转
+        // 4. 处理广告页跳转逻辑 (针对 cuttlinks / tpi / fitnesstipz)
         console.log('⏳ 监控跳转过程中...');
         
         for (let i = 0; i < 60; i++) {
-            // 如果已经监听到最终 URL，直接跳转
             if (capturedRenewUrl) {
-                console.log('🚀 捕获到目标，强制执行最终跳转');
+                console.log('🚀 捕获到目标链接，执行最终跳转');
                 await page.goto(capturedRenewUrl);
                 break;
             }
 
-            // 暴力尝试：点击页面上所有看起来像“跳转”的元素
+            // 暴力重复点击逻辑
             await page.evaluate(() => {
                 const selectors = [
                     '#continue', '#getnewlink', 'a.get-link', 
-                    '.btn-success', 'p.getmylink', 'span.wp2continuelink'
+                    '.btn-success', 'p.getmylink', 'span.wp2continuelink',
+                    'a[href*="cuttlinks.com"]', 'button'
                 ];
                 selectors.forEach(s => {
-                    const el = document.querySelector(s);
-                    if (el) {
-                        el.classList.remove('disabled');
-                        el.click();
-                    }
+                    const elements = document.querySelectorAll(s);
+                    elements.forEach(el => {
+                        // 检查可点击性并执行重复点击
+                        const style = window.getComputedStyle(el);
+                        if (style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none') {
+                            el.click();
+                        }
+                    });
                 });
-                // 尝试调用页面可能存在的跳转函数
                 if (typeof window.get_link === 'function') window.get_link();
             }).catch(() => {});
 
-            // 检查当前 URL 是否已经到达 Pella 续期页
             if (page.url().includes('pella.app/renew/')) break;
             
             await sleep(1500);
