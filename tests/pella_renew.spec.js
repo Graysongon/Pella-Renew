@@ -2,30 +2,33 @@
 const { test, chromium } = require('@playwright/test');
 const https = require('https');
 
+// ── 账号配置 ────────────────────────────────────────────────
 const [PELLA_EMAIL, PELLA_PASSWORD] = (process.env.PELLA_ACCOUNT || ',').split(',');
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
 const TIMEOUT = 180000;
 
-// ── 针对 tpi.li / cuttlinks 的强力注入脚本 ────────────────
-const POWER_BYPASS_JS = `
+// ── 针对 cuttlinks 的专项增强脚本 ──────────────────────────
+const BYPASS_JS = `
 (function() {
     'use strict';
-    // 1. 屏蔽弹窗
-    window.open = function() { return null; };
-    // 2. 移除阻碍点击的透明层
+    // 强制清理广告遮罩并激活按钮
     setInterval(() => {
-        document.querySelectorAll('div[style*="z-index: 2147483647"], .popunder, #popads_container').forEach(el => el.remove());
-        // 强制激活所有按钮
-        ['#continue', '#getnewlink', 'a.get-link', '.btn-success'].forEach(s => {
+        const badElements = document.querySelectorAll('div[class*="overlay"], .popunder, iframe[src*="google"]');
+        badElements.forEach(el => el.remove());
+        
+        const selectors = ['#continue', '#getnewlink', 'a.get-link', '.btn-success', '.wp2continuelink', 'button#btn-main'];
+        selectors.forEach(s => {
             const btn = document.querySelector(s);
             if (btn) {
                 btn.classList.remove('disabled');
                 btn.style.display = 'block';
                 btn.style.pointerEvents = 'auto';
+                btn.style.visibility = 'visible';
             }
         });
     }, 1000);
+    window.open = () => null; 
 })();
 `;
 
@@ -34,7 +37,10 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function sendTG(result) {
     return new Promise((resolve) => {
         if (!TG_CHAT_ID || !TG_TOKEN) return resolve();
-        const body = JSON.stringify({ chat_id: TG_CHAT_ID, text: `🎮 Pella 续期: ${result}` });
+        const body = JSON.stringify({ 
+            chat_id: TG_CHAT_ID, 
+            text: `🎮 Pella 续期通知\n📊 结果: ${result}\n🕐 时间: ${new Date().toLocaleString('zh-CN', {timeZone:'Asia/Shanghai'})}` 
+        });
         const req = https.request({
             hostname: 'api.telegram.org',
             path: `/bot${TG_TOKEN}/sendMessage`,
@@ -61,10 +67,13 @@ test('Pella 自动续期', async () => {
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     });
     
-    await context.addInitScript(POWER_BYPASS_JS);
+    await context.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
+    await context.addInitScript(BYPASS_JS);
+    
     const page = await context.newPage();
 
     try {
+        // 1. 登录 Pella
         console.log('🔑 登录 Pella...');
         await page.goto('https://www.pella.app/login', { waitUntil: 'networkidle' });
         await page.fill('#identifier-field', PELLA_EMAIL);
@@ -75,6 +84,7 @@ test('Pella 自动续期', async () => {
         await page.waitForURL(/pella\.app\/(home|dashboard)/, { timeout: 30000 });
         console.log('✅ 登录成功');
 
+        // 2. 筛选链接：跳过 tpi.li，寻找可用链接
         await sleep(3000);
         const token = await page.evaluate('window.Clerk.session.getToken()');
         const res = await page.evaluate(async (t) => {
@@ -82,66 +92,70 @@ test('Pella 自动续期', async () => {
             return r.json();
         }, token);
 
-        // 挑选链接：不再屏蔽 tpi.li
         let renewLink = null;
+        let selectedServer = '';
+
         for (const s of (res.servers || [])) {
-            const link = (s.renew_links || []).find(l => !l.claimed);
-            if (link) { renewLink = link.link; break; }
+            const links = s.renew_links || [];
+            // 重点：排除 tpi.li，优先选择 cuttlinks.com
+            const safeLinks = links.filter(l => !l.claimed && !l.link.includes('tpi.li'));
+            const target = safeLinks.find(l => l.link.includes('cuttlinks.com')) || safeLinks[0];
+            
+            if (target) {
+                renewLink = target.link;
+                selectedServer = s.name || s.id;
+                break;
+            }
         }
 
         if (!renewLink) {
-            console.log('⚠️ 今日无需续期');
+            console.log('⚠️ 所有的待续期链接均为 tpi.li 或已领取。');
+            console.log('⏩ 脚本将跳过本次执行，等待 Pella 分发 cuttlinks 链接。');
             return;
         }
 
-        console.log(`🌐 访问续期链接: ${renewLink}`);
+        console.log(`🌐 正在续期服务器: ${selectedServer}`);
+        console.log(`🌐 访问有效链接: ${renewLink}`);
 
-        // 监听目标 URL
+        // 📡 开启网络嗅探，一旦发现最终跳转地址立刻截获
         let capturedUrl = null;
         page.on('request', req => {
-            if (req.url().includes('pella.app/renew/')) capturedUrl = req.url();
+            if (req.url().includes('pella.app/renew/')) {
+                capturedUrl = req.url();
+                console.log('🎯 捕获到目标跳转: ' + capturedUrl);
+            }
         });
 
         await page.goto(renewLink, { waitUntil: 'domcontentloaded' });
 
-        // 🏹 针对 tpi.li 的 Cloudflare 穿透
-        console.log('🛡️ 等待验证加载...');
-        await sleep(8000); 
-        const cfFrame = await page.$('iframe[src*="turnstile"]');
-        if (cfFrame) {
-            console.log('👆 发现 CF 验证，尝试点击...');
-            await cfFrame.click().catch(() => {});
-            await sleep(5000);
-        }
-
-        // 🏹 暴力跳转逻辑
+        // 3. 处理跳转逻辑
+        console.log('⏳ 正在处理跳转穿透...');
         for (let i = 0; i < 40; i++) {
             if (capturedUrl || page.url().includes('pella.app/renew/')) break;
 
+            // 针对 cuttlinks 执行暴力点击
             await page.evaluate(() => {
-                // 1. 尝试直接执行跳转函数 (tpi.li 常用逻辑)
-                if (typeof window.get_link === 'function') { window.get_link(); }
-                // 2. 尝试从页面变量中直接提取地址
-                const links = Array.from(document.querySelectorAll('a')).map(a => a.href);
-                const target = links.find(l => l.includes('pella.app/renew/'));
-                if (target) { location.href = target; }
-                // 3. 点击按钮
-                const btn = document.querySelector('a.get-link, .btn-success, #getnewlink');
-                if (btn) btn.click();
+                const btnSelectors = ['#continue', '#getnewlink', 'a.get-link', '.btn-success', '.wp2continuelink'];
+                btnSelectors.forEach(s => {
+                    const el = document.querySelector(s);
+                    if (el && !el.classList.contains('disabled')) el.click();
+                });
+                if (typeof window.get_link === 'function') window.get_link();
             }).catch(() => {});
 
             await sleep(2000);
-            if (i % 5 === 0) console.log(`   ⏱️ 等待跳转中: ${page.url()}`);
+            if (i % 5 === 0) console.log(`   ⏱️ 当前页面: ${page.url()}`);
         }
 
+        // 4. 最终确认
         if (capturedUrl) await page.goto(capturedUrl);
 
-        await page.waitForURL(/pella\.app\/renew\//, { timeout: 20000 }).catch(() => {});
+        await page.waitForURL(/pella\.app\/renew\//, { timeout: 15000 }).catch(() => {});
         if (page.url().includes('/renew/')) {
-            console.log('🎉 续期成功！');
-            await sendTG('✅ 续期动作已成功');
+            console.log('🎉 任务完成！');
+            await sendTG(`✅ 服务器 ${selectedServer} 续期成功 (避开了 tpi.li)`);
         } else {
-            throw new Error('未到达最终页面: ' + page.url());
+            throw new Error('未到达续期完成页，当前: ' + page.url());
         }
 
     } catch (e) {
