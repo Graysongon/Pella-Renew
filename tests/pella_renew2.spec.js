@@ -1,4 +1,3 @@
-```javascript
 // tests/pella_renew.spec.js
 const { test, chromium } = require('@playwright/test');
 const https = require('https');
@@ -600,4 +599,3 @@ test('Pella 自动多轮续期', async () => {
         await browser.close();
     }
 });
-```
