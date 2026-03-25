@@ -9,35 +9,24 @@ const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
 const TIMEOUT = 120000;
 
-// ── 广告拦截与元素清洗（针对 cuty.io） ──────────────────────
+// ── 广告拦截与元素清洗 ──────────────────────────────────────
 const AD_BLOCK_SCRIPT = `
 (function() {
     'use strict';
     function removeAds() {
-        // 移除可能遮挡按钮的透明层和弹窗
-        document.querySelectorAll('div[style*="z-index: 2147483647"], .popunder, .ad-overlay').forEach(el => el.remove());
-        const btn = document.querySelector('#submit-button');
-        if (btn) btn.style.zIndex = '9999';
+        // 移除可能遮挡按钮的透明层和弹窗 (cuty.io & tpi.li 通用)
+        document.querySelectorAll('div[style*="z-index: 2147483647"], .popunder, .ad-overlay, iframe[src*="vidoza"]').forEach(el => el.remove());
+        const cutyBtn = document.querySelector('#submit-button');
+        if (cutyBtn) cutyBtn.style.zIndex = '9999';
+        const tpiBtn = document.querySelector('#continue');
+        if (tpiBtn) tpiBtn.style.zIndex = '9999';
     }
     window.open = () => null; 
     new MutationObserver(removeAds).observe(document.documentElement, { childList: true, subtree: true });
 })();
 `;
 
-// ── 工具函数 ────────────────────────────────────────────────
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-async function sendTG(text) {
-    if (!TG_CHAT_ID || !TG_TOKEN) return;
-    const body = JSON.stringify({ chat_id: TG_CHAT_ID, text: `🎮 Pella 自动续期:\n${text}` });
-    const req = https.request({
-        hostname: 'api.telegram.org',
-        path: `/bot${TG_TOKEN}/sendMessage`,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-    }, (res) => {});
-    req.write(body); req.end();
-}
 
 async function getWindowOffset(page) {
     try {
@@ -51,142 +40,146 @@ async function getWindowOffset(page) {
 
 // ── 处理 CF Turnstile 验证 ──────────────────────────────────
 async function solveTurnstile(page) {
-    console.log('🛡️ 检测到 Cloudflare 验证，尝试点击...');
+    console.log('🛡️ 正在尝试穿透 Cloudflare 验证...');
     await sleep(3000);
     const coords = await page.evaluate(() => {
         const el = document.querySelector('.cf-turnstile') || document.querySelector('iframe[src*="cloudflare"]');
         if (!el) return null;
         const rect = el.getBoundingClientRect();
-        return { x: rect.left + 45, y: rect.top + (rect.height / 2) };
+        return { x: rect.left + 50, y: rect.top + (rect.height / 2) };
     });
     if (coords) {
         const { winX, winY, toolbar } = await getWindowOffset(page);
         const absX = Math.round(coords.x + winX);
         const absY = Math.round(coords.y + winY + toolbar);
         execSync(`xdotool mousemove ${absX} ${absY} click 1`);
-        console.log(`📐 xdotool 模拟点击: (${absX}, ${absY})`);
-        await sleep(5000);
+        console.log(`📐 xdotool 模拟点击验证: (${absX}, ${absY})`);
+        await sleep(6000);
     }
 }
 
 // ── 处理 Cuty.io 逻辑 ──────────────────────────────────────
 async function handleCuty(page) {
-    console.log(`🌐 正在处理 Cuty.io: ${page.url()}`);
+    console.log(`🌐 正在处理 Cuty.io 流程...`);
     try {
-        // 1. 等待提交按钮进入可点击状态
-        const submitBtn = page.locator('#submit-button');
-        await submitBtn.waitFor({ state: 'visible', timeout: 15000 });
-        await sleep(1000);
-        await submitBtn.click({ force: true });
+        await page.waitForSelector('#submit-button', { timeout: 15000 });
+        await page.click('#submit-button', { force: true });
+        await sleep(3000);
         
-        // 2. 检查验证
-        await sleep(2000);
         if (await page.locator('.cf-turnstile').isVisible()) {
             await solveTurnstile(page);
         }
 
-        // 3. 等待倒计时及最终跳转按钮
-        console.log('⏳ 等待 10 秒倒计时...');
+        console.log('⏳ 等待倒计时及跳转按钮...');
         await sleep(12000);
-        const getLinkBtn = page.locator('a:has-text("Get Link"), button:has-text("Go")').first();
-        await getLinkBtn.click({ timeout: 10000 }).catch(() => console.log('⚠️ 尝试强制点击 Go 按钮'));
+        // Cuty 可能显示 "Go" 或 "Get Link"
+        const finalBtn = page.locator('a:has-text("Get Link"), button:has-text("Go"), a:has-text("GO")').first();
+        await finalBtn.click({ timeout: 10000 });
         return true;
     } catch (e) {
-        console.log(`❌ Cuty.io 处理失败: ${e.message}`);
+        console.log(`❌ Cuty.io 失败: ${e.message}`);
+        return false;
+    }
+}
+
+// ── 处理 Tpi.li 逻辑 ───────────────────────────────────────
+async function handleTpi(page) {
+    console.log(`🌐 正在处理 Tpi.li 流程...`);
+    try {
+        await page.waitForSelector('#continue', { timeout: 15000 });
+        await page.click('#continue');
+        await sleep(2000);
+        
+        if (await page.locator('.cf-turnstile').isVisible()) {
+            await solveTurnstile(page);
+        }
+        
+        console.log('⏳ 等待 Tpi 倒计时...');
+        await sleep(10000);
+        const getLink = page.locator('a.btn-success:has-text("Get Link")');
+        await getLink.waitFor({ state: 'visible' });
+        await getLink.click();
+        return true;
+    } catch (e) {
+        console.log(`❌ Tpi.li 失败: ${e.message}`);
         return false;
     }
 }
 
 // ── 主测试 ──────────────────────────────────────────────────
 test('Pella 自动续期任务', async () => {
-    const browser = await chromium.launch({ headless: false, args: ['--no-sandbox'] });
+    const browser = await chromium.launch({ headless: false, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     const context = await browser.newContext();
     await context.addInitScript(AD_BLOCK_SCRIPT);
     const page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
 
     try {
-        // 1. 登录流程优化
+        // 1. 登录
         console.log('🔑 访问登录页面...');
-        await page.goto('https://www.pella.app/login', { waitUntil: 'networkidle' });
-        
+        await page.goto('https://www.pella.app/login', { waitUntil: 'domcontentloaded' });
         await page.fill('#identifier-field', PELLA_EMAIL);
-        await page.click('button.cl-formButtonPrimary'); // 统一使用 Clerk 的类名点击
-
-        await sleep(3000);
+        await page.click('button.cl-formButtonPrimary');
         
-        // 防御：如果检测到跳转至 Google 登录
-        if (page.url().includes('google.com')) {
-            throw new Error('检测到账号绑定了 Google 登录，请使用普通邮箱密码账号或预先注入 Cookie。');
-        }
-
-        // 等待密码框启用
-        console.log('✏️ 填写密码...');
         const pwdInput = page.locator('input[name="password"]');
-        await pwdInput.waitFor({ state: 'attached' });
-        // 循环等待直到 password 框不再是 disabled
-        for(let i=0; i<10; i++) {
-            const isDisabled = await pwdInput.getAttribute('disabled');
-            if (isDisabled === null) break;
-            await sleep(1000);
-        }
+        await pwdInput.waitFor({ state: 'visible' });
+        // 确保 password 框已启用
+        await page.waitForFunction(() => !document.querySelector('input[name="password"]').disabled);
         await pwdInput.fill(PELLA_PASSWORD);
         await page.click('button.cl-formButtonPrimary');
 
         await page.waitForURL(/dashboard|home/, { timeout: 30000 });
         console.log('✅ 登录成功');
 
-        // 2. 自动化续期循环
-        let taskFinished = false;
-        while (!taskFinished) {
-            console.log('🔍 获取服务器列表...');
+        // 2. 任务循环
+        let counter = 0;
+        while (counter < 10) { // 最多处理10个任务防止死循环
+            counter++;
+            console.log(`🔍 正在检索第 ${counter} 个续期任务...`);
             await page.goto('https://www.pella.app/servers', { waitUntil: 'networkidle' });
             
             const token = await page.evaluate(() => window.Clerk?.session?.getToken());
-            if (!token) throw new Error('未能获取 Clerk Token');
-
             const serversRes = await page.evaluate(async (t) => {
                 const r = await fetch('https://api.pella.app/user/servers', { headers: { 'Authorization': `Bearer ${t}` } });
                 return r.json();
             }, token);
 
-            // 寻找未领取的续期链接
             const server = serversRes.servers?.find(s => s.renew_links?.some(l => !l.claimed));
             if (!server) {
-                console.log('🎉 所有服务器今日已续期！');
-                await sendTG('所有服务器已续期完毕');
-                taskFinished = true;
+                console.log('🎉 今日任务全部完成！');
                 break;
             }
 
             const targetLink = server.renew_links.find(l => !l.claimed).link;
-            console.log(`🔗 处理服务器 ${server.ip}，链接: ${targetLink}`);
+            console.log(`🔗 服务器: ${server.ip} -> 访问: ${targetLink}`);
 
             await page.goto(targetLink);
             await sleep(3000);
 
-            // 区分平台处理
-            if (page.url().includes('cuty.io')) {
+            // 识别平台并处理
+            const currentUrl = page.url();
+            if (currentUrl.includes('cuty.io')) {
                 await handleCuty(page);
+            } else if (currentUrl.includes('tpi.li')) {
+                await handleTpi(page);
             } else {
-                console.log('⚠️ 未知跳转目标，尝试查找通用按钮');
-                await page.click('button:has-text("Continue"), #continue').catch(() => {});
+                console.log('⚠️ 遇到未知平台，尝试通用点击');
+                await page.click('#continue, button:has-text("Continue")').catch(() => {});
             }
 
-            // 验证是否返回成功页
+            // 关键：等待重定向回 Pella 并验证结果
             try {
-                await page.waitForURL(/pella\.app\/renew\//, { timeout: 20000 });
-                console.log(`✅ ${server.ip} 续期流程触发成功`);
+                await page.waitForURL(/pella\.app\/renew\//, { timeout: 25000 });
+                console.log('✅ 续期完成，准备下一个...');
                 await sleep(2000);
             } catch (e) {
-                console.log(`⚠️ 续期跳转确认超时，尝试下一次循环。当前URL: ${page.url()}`);
+                console.log('⚠️ 未能检测到跳转回 Pella，可能需要手动重置页面');
             }
         }
 
     } catch (e) {
-        console.error(`💥 脚本报错: ${e.message}`);
-        await page.screenshot({ path: 'error_debug.png' });
-        await sendTG(`脚本异常: ${e.message}`);
+        console.error(`💥 运行中断: ${e.message}`);
+        await page.screenshot({ path: 'debug_error.png' });
         throw e;
     } finally {
         await browser.close();
