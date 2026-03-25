@@ -321,17 +321,7 @@ test('Pella 自动多轮续期', async () => {
     console.log('🚀 浏览器就绪！');
 
     try {
-        // ── 出口 IP 验证 ──────────────────────────────────────
-        console.log('🌐 验证出口 IP...');
-        try {
-            const res = await page.goto('https://api.ipify.org?format=json', { waitUntil: 'domcontentloaded' });
-            const body = await res.text();
-            const ip = JSON.parse(body).ip || body;
-            const masked = ip.replace(/(\d+\.\d+\.\d+\.)\d+/, '$1xx');
-            console.log(`✅ 出口 IP 确认：${masked}`);
-        } catch {
-            console.log('⚠️ IP 验证超时，跳过');
-        }
+        
 
         // ── 登录 pella.app ────────────────────────────────────
         console.log('🔑 打开 Pella 登录页...');
