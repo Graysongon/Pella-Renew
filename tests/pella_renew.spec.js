@@ -82,9 +82,9 @@ test('Pella 全自动化集群维护协议', async ({}) => {
             }
 
             // 提取并修正链接
-            let rawLink = server.renew_links.find(l => !l.claimed).link;
-            let targetLink = rawLink.replace('tpi.li', 'cuty.io'); 
-            console.log(`📌 锁定目标: [${server.ip}]`);
+            let rawLink = server.find(l => !l.claimed).link;
+            let targetLink = rawLink.replace('cuty.io'); 
+        
             console.log(`🚀 注入链接: ${targetLink}`);
 
             // 跳转到 Cuty.io
