@@ -6,14 +6,14 @@ const https = require('https');
 const [PELLA_EMAIL, PELLA_PASSWORD] = (process.env.PELLA_ACCOUNT || ',').split(',');
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
-// 增加总超时时间到 180 秒，应对代理网络延迟
 const TIMEOUT = 180000;
 
-// ── 广告拦截脚本（针对 Pella 续期页常见广告源）──────────────
+// ── 广告拦截与防检测 ────────────────────────────────────────
 const AD_BLOCK_SCRIPT = `
 (function() {
     'use strict';
-    const blocked = ['madurird.com', 'crn77.com', 'fqjiujafk.com', 'popads', 'avnsgames.com'];
+    // 屏蔽已知的广告和干扰脚本
+    const blocked = ['madurird.com', 'crn77.com', 'fqjiujafk.com', 'popads', 'avnsgames.com', 'mshcdn.com'];
     new MutationObserver(mutations => {
         mutations.forEach(m => {
             m.addedNodes.forEach(node => {
@@ -24,16 +24,19 @@ const AD_BLOCK_SCRIPT = `
         });
     }).observe(document.documentElement, { childList: true, subtree: true });
 
-    window.open = () => null; // 禁止弹出新窗口
+    window.open = () => null; // 彻底禁止弹窗
+    // 强制显示被隐藏的 Get Link 按钮
     setInterval(() => {
-        ['#continue', '#submit-button', '#getnewlink'].forEach(id => {
-            document.querySelector(id)?.removeAttribute('onclick');
-        });
+        const btn = document.querySelector('a.get-link, #get-link, .btn-success');
+        if (btn) {
+            btn.style.display = 'block !important';
+            btn.style.visibility = 'visible !important';
+            btn.classList.remove('disabled');
+        }
     }, 1000);
 })();
 `;
 
-// ── 工具函数 ────────────────────────────────────────────────
 function nowStr() {
     return new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }).replace(/\//g, '-');
 }
@@ -62,65 +65,28 @@ function sendTG(result, extra = '') {
     });
 }
 
-// ── Cloudflare Turnstile 处理 ──────────────────────────────
+// ── 处理 CF 验证 ──────────────────────────────────────────
 async function solveTurnstile(page) {
-    await sleep(2000);
-    // 检查是否已经自动通过
-    const isPassed = await page.evaluate(() => {
-        const val = document.querySelector('input[name="cf-turnstile-response"]')?.value;
-        return val && val.length > 20;
-    });
-    if (isPassed) return true;
+    await sleep(3000);
+    const check = () => page.evaluate(() => document.querySelector('input[name="cf-turnstile-response"]')?.value?.length > 20);
+    if (await check()) return true;
 
     try {
-        const frame = await page.waitForSelector('.cf-turnstile iframe, iframe[src*="turnstile"]', { timeout: 8000 });
+        const frame = await page.waitForSelector('iframe[src*="turnstile"]', { timeout: 8000 });
         if (frame) {
-            await frame.scrollIntoViewIfNeeded();
-            await sleep(1000);
-            await frame.click({ delay: 200 }); 
+            await frame.click();
+            console.log('👆 已手动点击 CF 验证框');
         }
-    } catch (e) {
-        console.log('⚠️ CF 点击未发现或失败，等待自动验证...');
-    }
-
-    for (let i = 0; i < 40; i++) {
-        await sleep(1000);
-        const val = await page.evaluate(() => document.querySelector('input[name="cf-turnstile-response"]')?.value);
-        if (val && val.length > 20) return true;
-    }
-    return false;
-}
-
-// ── Fitnesstipz 中转页处理 ──────────────────────────────────
-async function handleFitnesstipz(page) {
-    console.log(`  📄 中转页: ${page.url()}`);
-    try {
-        await page.waitForSelector('p.getmylink', { timeout: 10000 });
-        await page.click('p.getmylink');
     } catch (e) {}
 
     for (let i = 0; i < 30; i++) {
         await sleep(1000);
-        const hidden = await page.evaluate(() => {
-            const el = document.querySelector('#newtimer');
-            return !el || window.getComputedStyle(el).display === 'none';
-        });
-        if (hidden) break;
+        if (await check()) return true;
     }
-
-    try { await page.click('span.wp2continuelink', { force: true }); } catch (e) {}
-    await sleep(2000);
-
-    try {
-        await page.waitForSelector('#getnewlink', { timeout: 10000 });
-        await page.click('#getnewlink', { force: true });
-        return true;
-    } catch (e) {
-        return false;
-    }
+    return false;
 }
 
-// ── 主测试流程 ──────────────────────────────────────────────
+// ── 主测试 ──────────────────────────────────────────────────
 test('Pella 自动续期', async () => {
     test.setTimeout(TIMEOUT);
     if (!PELLA_EMAIL || !PELLA_PASSWORD) throw new Error('配置缺失');
@@ -135,7 +101,7 @@ test('Pella 自动续期', async () => {
 
     const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        viewport: { width: 1920, height: 1080 }
+        viewport: { width: 1280, height: 800 }
     });
     
     await context.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
@@ -144,18 +110,19 @@ test('Pella 自动续期', async () => {
     const page = await context.newPage();
 
     try {
+        // 1. 登录
         console.log('🔑 登录 Pella...');
         await page.goto('https://www.pella.app/login', { waitUntil: 'networkidle' });
         await page.fill('#identifier-field', PELLA_EMAIL);
-        await page.click('button.cl-formButtonPrimary', { timeout: 10000 }).catch(() => page.click('span.cl-internal-2iusy0'));
-        
+        await page.keyboard.press('Enter');
         await page.waitForSelector('input[name="password"]', { timeout: 15000 });
         await page.fill('input[name="password"]', PELLA_PASSWORD);
-        await page.click('button.cl-formButtonPrimary', { timeout: 10000 }).catch(() => page.click('span.cl-internal-2iusy0'));
+        await page.keyboard.press('Enter');
         
         await page.waitForURL(/pella\.app\/(home|dashboard)/, { timeout: 30000 });
         console.log('✅ 登录成功');
 
+        // 2. 获取续期链接
         await sleep(3000);
         const token = await page.evaluate('window.Clerk.session.getToken()');
         const res = await page.evaluate(async (t) => {
@@ -175,94 +142,73 @@ test('Pella 自动续期', async () => {
         }
 
         console.log(`🌐 访问续期链接: ${renewLink}`);
+
+        // 🎯 核心增强：开启请求监听，捕获所有重定向和跳转
+        let capturedRenewUrl = null;
+        page.on('request', request => {
+            const url = request.url();
+            if (url.includes('pella.app/renew/')) {
+                capturedRenewUrl = url;
+                console.log('📡 监听到目标 URL: ' + url);
+            }
+        });
+
         await page.goto(renewLink, { waitUntil: 'domcontentloaded' });
 
-        // 1. 处理 Cloudflare
+        // 3. 处理 CF 验证
         if (await page.$('input[name="cf-turnstile-response"]')) {
             console.log('🛡️ 处理 CF 验证...');
-            if (!await solveTurnstile(page)) throw new Error('CF 验证超时');
+            await solveTurnstile(page);
         }
 
-        // 2. 初始 Continue 按钮
-        try {
-            await page.waitForSelector('#continue', { timeout: 10000 });
-            await page.click('#continue', { force: true });
-        } catch (e) {}
-
-        // 3. 处理中转循环
-        let loop = 0;
-        while (page.url().includes('fitnesstipz.com') && loop < 5) {
-            loop++;
-            if (!await handleFitnesstipz(page)) throw new Error('中转处理失败');
-            await sleep(3000);
-        }
-
-        // 4. 处理 tpi.li 终极关卡 (暴力破解模式)
-        if (page.url().includes('tpi.li')) {
-            console.log('⏳ 正在执行 tpi.li 暴力破解...');
-            
-            const hacked = await page.evaluate(() => {
-                try {
-                    // 尝试调用页面自带的跳转函数
-                    if (typeof window.get_link === 'function') { window.get_link(); return 'function_called'; }
-                    const btn = document.querySelector('a.btn.btn-success.btn-lg.get-link');
-                    if (btn) {
-                        btn.style.setProperty('display', 'block', 'important');
-                        btn.classList.remove('disabled');
-                        btn.click();
-                        return 'forced_click';
-                    }
-                } catch (e) { return 'err: ' + e.message; }
-                return 'not_found';
-            });
-            console.log(`   🛠️ 尝试状态: ${hacked}`);
-
-            let success = (hacked === 'function_called' || hacked === 'forced_click');
-            if (!success) {
-                for (let i = 0; i < 40; i++) {
-                    await sleep(1000);
-                    const readyUrl = await page.evaluate(() => {
-                        const btn = document.querySelector('a.btn.btn-success.btn-lg.get-link');
-                        return (btn && btn.href && btn.href.length > 20) ? btn.href : null;
-                    });
-                    if (readyUrl) {
-                        console.log('🎯 发现跳转链接，立即前往...');
-                        await page.goto(readyUrl);
-                        success = true;
-                        break;
-                    }
-                }
+        // 4. 处理 tpi.li / fitnesstipz 混合跳转
+        console.log('⏳ 监控跳转过程中...');
+        
+        for (let i = 0; i < 60; i++) {
+            // 如果已经监听到最终 URL，直接跳转
+            if (capturedRenewUrl) {
+                console.log('🚀 捕获到目标，强制执行最终跳转');
+                await page.goto(capturedRenewUrl);
+                break;
             }
 
-            if (!success) {
-                // 最后的兜底：搜索页面内所有的 Pella 链接
-                const backupUrl = await page.evaluate(() => {
-                    const a = Array.from(document.querySelectorAll('a')).find(el => el.href.includes('pella.app/renew'));
-                    return a ? a.href : null;
+            // 暴力尝试：点击页面上所有看起来像“跳转”的元素
+            await page.evaluate(() => {
+                const selectors = [
+                    '#continue', '#getnewlink', 'a.get-link', 
+                    '.btn-success', 'p.getmylink', 'span.wp2continuelink'
+                ];
+                selectors.forEach(s => {
+                    const el = document.querySelector(s);
+                    if (el) {
+                        el.classList.remove('disabled');
+                        el.click();
+                    }
                 });
-                if (backupUrl) {
-                    console.log('🔗 捕获到备用链接，强制跳转...');
-                    await page.goto(backupUrl);
-                    success = true;
-                }
-            }
+                // 尝试调用页面可能存在的跳转函数
+                if (typeof window.get_link === 'function') window.get_link();
+            }).catch(() => {});
 
-            if (!success) throw new Error('tpi.li 破解失败');
+            // 检查当前 URL 是否已经到达 Pella 续期页
+            if (page.url().includes('pella.app/renew/')) break;
+            
+            await sleep(1500);
+            if (i % 10 === 0) console.log(`   ⏱️ 等待中... 当前地址: ${page.url()}`);
         }
 
         // 5. 验证结果
-        await page.waitForURL(/pella\.app\/renew\//, { timeout: 20000 }).catch(() => {});
+        await page.waitForURL(/pella\.app\/renew\//, { timeout: 15000 }).catch(() => {});
         if (page.url().includes('/renew/')) {
-            console.log('🎉 续期动作已完成！');
-            await sendTG('✅ 续期动作成功');
+            console.log('🎉 续期成功！');
+            await sendTG('✅ 续期成功！');
         } else {
-            throw new Error('未检测到最终续期页面，当前 URL: ' + page.url());
+            throw new Error('未到达最终页面，当前 URL: ' + page.url());
         }
 
     } catch (e) {
         await page.screenshot({ path: 'error.png' });
-        console.error(`❌ 错误详情: ${e.message}`);
-        await sendTG(`❌ 脚本异常: ${e.message}`);
+        console.error(`❌ 故障: ${e.message}`);
+        await sendTG(`❌ 续期失败: ${e.message}`);
         throw e;
     } finally {
         await browser.close();
