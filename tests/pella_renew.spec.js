@@ -1,112 +1,73 @@
 // tests/pella_renew.spec.js
 const { test, chromium } = require('@playwright/test');
-const https = require('https');
-const http = require('http');
 const { execSync } = require('child_process');
 
+// 环境变量获取
 const [PELLA_EMAIL, PELLA_PASSWORD] = (process.env.PELLA_ACCOUNT || ',').split(',');
-const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
-const TIMEOUT = 100000; 
 
-const AD_BLOCK_SCRIPT = `
+// 广告屏蔽与层级置顶脚本
+const AD_CLEANER = `
 (function() {
-    'use strict';
-    function clean() {
-        // 移除 cuty.io 的透明广告遮罩
+    setInterval(() => {
+        // 移除所有全屏透明遮罩层
         document.querySelectorAll('div[style*="z-index: 2147483647"], .popunder, .ad-overlay').forEach(el => el.remove());
-        const btn = document.querySelector('#submit-button');
-        if (btn) btn.style.zIndex = '99999';
-    }
-    window.open = () => null;
-    setInterval(clean, 1000);
+        // 强制显示隐藏的按钮
+        const btn = document.querySelector('#submit-button, #get-link, .btn-success');
+        if (btn) {
+            btn.style.setProperty('display', 'block', 'important');
+            btn.style.setProperty('visibility', 'visible', 'important');
+            btn.style.setProperty('z-index', '999999', 'important');
+        }
+    }, 500);
 })();
 `;
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+test.setTimeout(180000); // 设置测试总时长为 3 分钟
 
-// ── 硬件点击工具 ──────────────────────────────────────────────
-async function xdotoolClick(page, selector) {
-    try {
-        const rect = await page.evaluate((sel) => {
-            const el = document.querySelector(sel);
-            if (!el) return null;
-            const r = el.getBoundingClientRect();
-            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-        }, selector);
-
-        if (rect) {
-            // 获取窗口偏移（简单处理，通常 xvfb 下偏移固定）
-            const winX = 0, winY = 0, toolbar = 85; 
-            const absX = Math.round(rect.x + winX);
-            const absY = Math.round(rect.y + winY + toolbar);
-            execSync(`xdotool mousemove ${absX} ${absY} click 1`);
-            return true;
-        }
-    } catch (e) {}
-    return false;
-}
-
-// ── Cuty.io 核心逻辑 ─────────────────────────────────────────
-async function handleCutyIo(page) {
-    console.log('🌐 正在解析 Cuty.io 链路...');
-    
-    // 1. 点击 Submit
-    try {
-        await page.waitForSelector('#submit-button', { timeout: 15000 });
-        console.log('🖱️ 点击 #submit-button');
-        await page.click('#submit-button', { force: true, delay: 200 });
-    } catch (e) {
-        console.log('⚠️ 未找到 submit 按钮，可能已跳过');
-    }
-
-    await sleep(3000);
-
-    // 2. 处理 Turnstile (I am not a robot)
-    const cfFrame = page.locator('iframe[src*="cloudflare"]');
-    if (await cfFrame.count() > 0) {
-        console.log('🛡️ 检测到 Cloudflare 验证，尝试物理点击...');
-        await xdotoolClick(page, 'iframe[src*="cloudflare"]');
-        await sleep(10000); // 等待验证通过和倒计时加载
-    }
-
-    // 3. 等待倒计时并寻找 Go 按钮
-    console.log('⏳ 等待倒计时结束...');
-    await sleep(12000); 
-
-    const goButtons = ['#get-link', 'button:has-text("Go")', 'a:has-text("Go")', '.btn-success'];
-    for (const sel of goButtons) {
-        if (await page.locator(sel).isVisible()) {
-            console.log(`🚀 点击放行按钮: ${sel}`);
-            await page.click(sel, { force: true });
-            break;
-        }
-    }
-}
-
-// ── 主测试流程 ────────────────────────────────────────────────
-test('Pella 全自动化集群维护协议', async () => {
-    const browser = await chromium.launch({ headless: false, args: ['--no-sandbox'] });
-    const context = await browser.newContext();
-    await context.addInitScript(AD_BLOCK_SCRIPT);
+test('Pella 全自动化集群维护协议', async ({}) => {
+    // 启动浏览器
+    const browser = await chromium.launch({ 
+        headless: false, 
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-popup-blocking'] 
+    });
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    await context.addInitScript(AD_CLEANER);
     const page = await context.newPage();
 
+    // 工具：等待并物理点击 (针对无法通过 JS 点击的元素)
+    async function physicalClick(selector) {
+        try {
+            const loc = page.locator(selector).first();
+            await loc.waitFor({ state: 'visible', timeout: 10000 });
+            const box = await loc.boundingBox();
+            if (box) {
+                // 使用 xdotool 模拟物理点击，绕过所有前端干扰
+                const x = Math.round(box.x + box.width / 2);
+                const y = Math.round(box.y + box.height / 2 + 85); // 85 是浏览器工具栏预估高度
+                execSync(`xdotool mousemove ${x} ${y} click 1`);
+                return true;
+            }
+        } catch (e) { return false; }
+    }
+
     try {
-        console.log('🔑 登录 Pella...');
+        // 1. 登录流程
+        console.log('🔑 登录 Pella 平台...');
         await page.goto('https://www.pella.app/login');
         await page.fill('#identifier-field', PELLA_EMAIL);
         await page.click('button.cl-formButtonPrimary');
-        await page.waitForSelector('input[name="password"]');
+        await page.waitForSelector('input[name="password"]', { timeout: 10000 });
         await page.fill('input[name="password"]', PELLA_PASSWORD);
         await page.click('button.cl-formButtonPrimary');
         await page.waitForURL(/dashboard|home/);
-        console.log('✅ 登录成功');
+        console.log('✅ 登录验证成功');
 
-        let iteration = 0;
-        while (iteration < 5) { // 最多处理5个需要续期的节点
-            iteration++;
-            console.log(`\n🔄 第 ${iteration} 轮更新作业...`);
+        // 2. 自动化循环
+        let retryCount = 0;
+        while (retryCount < 5) {
+            console.log(`\n📡 [第 ${retryCount + 1} 轮作业] 正在拉取最新的节点拓扑...`);
             await page.goto('https://www.pella.app/servers', { waitUntil: 'networkidle' });
-            await sleep(3000);
+            await page.waitForTimeout(3000);
 
             const token = await page.evaluate(() => window.Clerk?.session?.getToken());
             const data = await page.evaluate(async (t) => {
@@ -116,36 +77,68 @@ test('Pella 全自动化集群维护协议', async () => {
 
             const server = data.servers?.find(s => s.renew_links?.some(l => !l.claimed));
             if (!server) {
-                console.log('🎉 所有节点已处于最佳状态，任务结束。');
+                console.log('🎉 汇报：当前所有集群节点均在线，无需维护。');
                 break;
             }
 
+            // 提取并修正链接
             let rawLink = server.renew_links.find(l => !l.claimed).link;
-            
-            // 🔥 关键：强制转换域名 tpi.li -> cuty.io
-            let targetLink = rawLink.replace('tpi.li', 'cuty.io');
+            let targetLink = rawLink.replace('tpi.li', 'cuty.io'); 
             console.log(`📌 锁定目标: [${server.ip}]`);
-            console.log(`🔗 原始链接: ${rawLink}`);
-            console.log(`🚀 强制跳转: ${targetLink}`);
+            console.log(`🚀 注入链接: ${targetLink}`);
 
+            // 跳转到 Cuty.io
             await page.goto(targetLink);
-            await sleep(5000);
-
-            // 执行 Cuty.io 处理流程
-            await handleCutyIo(page);
-
-            // 检查结果
+            
+            // 处理 Cuty.io 流程
             try {
+                // 第一步：点击验证/提交
+                await page.waitForTimeout(5000);
+                const submitBtn = page.locator('#submit-button');
+                if (await submitBtn.isVisible()) {
+                    console.log('🖱️ 点击 Cuty 初始提交按钮...');
+                    await submitBtn.click({ force: true }).catch(() => {});
+                }
+
+                // 处理可能出现的验证码 (Cloudflare)
+                const turnstile = page.locator('iframe[src*="cloudflare"]');
+                if (await turnstile.count() > 0) {
+                    console.log('🛡️ 发现人机验证，尝试模拟点击...');
+                    await physicalClick('iframe[src*="cloudflare"]');
+                    await page.waitForTimeout(10000);
+                }
+
+                // 第二步：等待倒计时并点击 Go
+                console.log('⏳ 等待倒计时与放行信号...');
+                await page.waitForTimeout(12000);
+                
+                // 监听新窗口弹出（Cuty.io 经常点 Go 弹广告）
+                const [popup] = await Promise.all([
+                    context.waitForEvent('page', { timeout: 5000 }).catch(() => null),
+                    page.click('a:has-text("Go"), button:has-text("Go"), #get-link', { force: true }).catch(() => {})
+                ]);
+
+                // 如果弹出了广告页，关掉它
+                if (popup) {
+                    console.log('🚫 自动屏蔽弹窗广告');
+                    await popup.close();
+                    // 关掉广告后可能需要再点一次真正的 Go
+                    await page.click('a:has-text("Go"), #get-link', { force: true }).catch(() => {});
+                }
+
+                // 第三步：等待返回 Pella
                 await page.waitForURL(/pella\.app\/renew\//, { timeout: 20000 });
-                console.log('✅ 该节点续期成功！');
-            } catch (e) {
-                console.log('⚠️ 续期跳转确认超时，返回主列表尝试下一个。');
+                console.log('✨ 指令校验成功，节点已续期。');
+            } catch (err) {
+                console.log(`⚠️ 当前轮次超时或异常，正在尝试容错处理...`);
             }
+
+            retryCount++;
         }
 
     } catch (e) {
-        console.error(`💥 脚本异常: ${e.message}`);
-        await page.screenshot({ path: 'error_debug.png' });
+        console.error(`💥 系统级灾难: ${e.message}`);
+        await page.screenshot({ path: 'disaster_recovery.png' });
     } finally {
         await browser.close();
     }
