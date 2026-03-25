@@ -1,82 +1,35 @@
 // tests/pella_renew.spec.js
 const { test, chromium } = require('@playwright/test');
 const https = require('https');
-const http = require('http');
 
 // ── 账号配置 ────────────────────────────────────────────────
 const [PELLA_EMAIL, PELLA_PASSWORD] = (process.env.PELLA_ACCOUNT || ',').split(',');
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
-// 增加总超时时间到 180 秒，防止网络波动导致超时
+// 增加总超时时间到 180 秒，应对代理网络延迟
 const TIMEOUT = 180000;
 
-// ── 广告拦截脚本（油猴 5.0 增强版）──────────────────────────
+// ── 广告拦截脚本（针对 Pella 续期页常见广告源）──────────────
 const AD_BLOCK_SCRIPT = `
 (function() {
     'use strict';
-    const blockedScriptDomains = ['madurird.com', 'crn77.com', 'fqjiujafk.com'];
+    const blocked = ['madurird.com', 'crn77.com', 'fqjiujafk.com', 'popads', 'avnsgames.com'];
     new MutationObserver(mutations => {
         mutations.forEach(m => {
             m.addedNodes.forEach(node => {
                 if (node.tagName === 'SCRIPT' && node.src) {
-                    if (blockedScriptDomains.some(d => node.src.includes(d))) {
-                        node.remove();
-                    }
+                    if (blocked.some(d => node.src.includes(d))) node.remove();
                 }
             });
         });
     }).observe(document.documentElement, { childList: true, subtree: true });
 
-    function init() {
-        window.open = () => null;
-        document.addEventListener('click', e => {
-            const a = e.target.closest('a');
-            if (!a) return;
-            const href = a.href || '';
-            if (['crn77.com', 'madurird.com', 'tinyurl.com', 'popads', 'avnsgames.com', 'fqjiujafk.com'].some(d => href.includes(d))) {
-                e.stopPropagation();
-                e.preventDefault();
-            }
-        }, true);
-
-        function removeAds() {
-            ['#continue', '#submit-button', '#getnewlink'].forEach(id => {
-                document.querySelector(id)?.removeAttribute('onclick');
-            });
-            document.querySelectorAll('[onclick*="crn77"],[onclick*="madurird"]').forEach(el => el.removeAttribute('onclick'));
-        }
-        removeAds();
-        setInterval(removeAds, 1500);
-    }
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
-    }
-})();
-`;
-
-// ── CF Turnstile token 监听脚本 ─────────────────────────────
-const CF_TOKEN_LISTENER_JS = `
-(function() {
-    if (window.__cf_token_listener_injected__) return;
-    window.__cf_token_listener_injected__ = true;
-    window.__cf_turnstile_token__ = '';
-    window.addEventListener('message', function(e) {
-        if (!e.origin || !e.origin.includes('cloudflare.com')) return;
-        var d = e.data;
-        if (!d || d.event !== 'complete' || !d.token) return;
-        window.__cf_turnstile_token__ = d.token;
-        var inputs = document.querySelectorAll('input[name="cf-turnstile-response"]');
-        for (var i = 0; i < inputs.length; i++) {
-            try {
-                var nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                nativeSet.call(inputs[i], d.token);
-                inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
-                inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
-            } catch(err) { inputs[i].value = d.token; }
-        }
-    });
+    window.open = () => null; // 禁止弹出新窗口
+    setInterval(() => {
+        ['#continue', '#submit-button', '#getnewlink'].forEach(id => {
+            document.querySelector(id)?.removeAttribute('onclick');
+        });
+    }, 1000);
 })();
 `;
 
@@ -109,21 +62,15 @@ function sendTG(result, extra = '') {
     });
 }
 
-// ── 检测 Token ──────────────────────────────────────────────
-async function checkCFToken(page) {
-    return await page.evaluate(() => {
-        const input = document.querySelector('input[name="cf-turnstile-response"]');
-        if (input && input.value && input.value.length > 20) return true;
-        if (window.__cf_turnstile_token__ && window.__cf_turnstile_token__.length > 20) return true;
-        return false;
-    });
-}
-
-// ── 处理 CF Turnstile ────────────────────────────────────────
+// ── Cloudflare Turnstile 处理 ──────────────────────────────
 async function solveTurnstile(page) {
-    await page.evaluate(CF_TOKEN_LISTENER_JS);
     await sleep(2000);
-    if (await checkCFToken(page)) return true;
+    // 检查是否已经自动通过
+    const isPassed = await page.evaluate(() => {
+        const val = document.querySelector('input[name="cf-turnstile-response"]')?.value;
+        return val && val.length > 20;
+    });
+    if (isPassed) return true;
 
     try {
         const frame = await page.waitForSelector('.cf-turnstile iframe, iframe[src*="turnstile"]', { timeout: 8000 });
@@ -133,17 +80,18 @@ async function solveTurnstile(page) {
             await frame.click({ delay: 200 }); 
         }
     } catch (e) {
-        console.log('⚠️ CF 点击失败，尝试等待自动通过...');
+        console.log('⚠️ CF 点击未发现或失败，等待自动验证...');
     }
 
     for (let i = 0; i < 40; i++) {
         await sleep(1000);
-        if (await checkCFToken(page)) return true;
+        const val = await page.evaluate(() => document.querySelector('input[name="cf-turnstile-response"]')?.value);
+        if (val && val.length > 20) return true;
     }
     return false;
 }
 
-// ── 处理 fitnesstipz 中转页 ──────────────────────────────────
+// ── Fitnesstipz 中转页处理 ──────────────────────────────────
 async function handleFitnesstipz(page) {
     console.log(`  📄 中转页: ${page.url()}`);
     try {
@@ -151,7 +99,7 @@ async function handleFitnesstipz(page) {
         await page.click('p.getmylink');
     } catch (e) {}
 
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 30; i++) {
         await sleep(1000);
         const hidden = await page.evaluate(() => {
             const el = document.querySelector('#newtimer');
@@ -172,12 +120,12 @@ async function handleFitnesstipz(page) {
     }
 }
 
-// ── 主测试 ──────────────────────────────────────────────────
+// ── 主测试流程 ──────────────────────────────────────────────
 test('Pella 自动续期', async () => {
     test.setTimeout(TIMEOUT);
     if (!PELLA_EMAIL || !PELLA_PASSWORD) throw new Error('配置缺失');
 
-    let proxyConfig = process.env.GOST_PROXY ? { server: 'http://127.0.0.1:8080' } : undefined;
+    const proxyConfig = process.env.GOST_PROXY ? { server: 'http://127.0.0.1:8080' } : undefined;
 
     const browser = await chromium.launch({
         headless: true,
@@ -208,7 +156,6 @@ test('Pella 自动续期', async () => {
         await page.waitForURL(/pella\.app\/(home|dashboard)/, { timeout: 30000 });
         console.log('✅ 登录成功');
 
-        // 获取 Token 并请求服务器列表
         await sleep(3000);
         const token = await page.evaluate('window.Clerk.session.getToken()');
         const res = await page.evaluate(async (t) => {
@@ -230,56 +177,91 @@ test('Pella 自动续期', async () => {
         console.log(`🌐 访问续期链接: ${renewLink}`);
         await page.goto(renewLink, { waitUntil: 'domcontentloaded' });
 
-        // 处理 CF 验证
+        // 1. 处理 Cloudflare
         if (await page.$('input[name="cf-turnstile-response"]')) {
-            console.log('🛡️ 检测到 CF，处理中...');
-            if (!await solveTurnstile(page)) throw new Error('CF 验证失败');
-            console.log('✅ CF 验证通过');
+            console.log('🛡️ 处理 CF 验证...');
+            if (!await solveTurnstile(page)) throw new Error('CF 验证超时');
         }
 
-        // 处理中转页逻辑
+        // 2. 初始 Continue 按钮
         try {
             await page.waitForSelector('#continue', { timeout: 10000 });
             await page.click('#continue', { force: true });
         } catch (e) {}
 
+        // 3. 处理中转循环
         let loop = 0;
         while (page.url().includes('fitnesstipz.com') && loop < 5) {
             loop++;
-            if (!await handleFitnesstipz(page)) throw new Error('中转页处理超时');
+            if (!await handleFitnesstipz(page)) throw new Error('中转处理失败');
             await sleep(3000);
         }
 
-        // 处理 tpi.li 最终页
+        // 4. 处理 tpi.li 终极关卡 (暴力破解模式)
         if (page.url().includes('tpi.li')) {
-            console.log('⏳ 正在处理 tpi.li 倒计时...');
-            let clicked = false;
-            for (let i = 0; i < 45; i++) {
-                await sleep(1000);
-                const isReady = await page.evaluate(() => {
+            console.log('⏳ 正在执行 tpi.li 暴力破解...');
+            
+            const hacked = await page.evaluate(() => {
+                try {
+                    // 尝试调用页面自带的跳转函数
+                    if (typeof window.get_link === 'function') { window.get_link(); return 'function_called'; }
                     const btn = document.querySelector('a.btn.btn-success.btn-lg.get-link');
-                    return btn && !btn.classList.contains('disabled') && window.getComputedStyle(btn).display !== 'none';
-                });
-                if (isReady) {
-                    await page.click('a.btn.btn-success.btn-lg.get-link', { force: true });
-                    clicked = true;
-                    break;
+                    if (btn) {
+                        btn.style.setProperty('display', 'block', 'important');
+                        btn.classList.remove('disabled');
+                        btn.click();
+                        return 'forced_click';
+                    }
+                } catch (e) { return 'err: ' + e.message; }
+                return 'not_found';
+            });
+            console.log(`   🛠️ 尝试状态: ${hacked}`);
+
+            let success = (hacked === 'function_called' || hacked === 'forced_click');
+            if (!success) {
+                for (let i = 0; i < 40; i++) {
+                    await sleep(1000);
+                    const readyUrl = await page.evaluate(() => {
+                        const btn = document.querySelector('a.btn.btn-success.btn-lg.get-link');
+                        return (btn && btn.href && btn.href.length > 20) ? btn.href : null;
+                    });
+                    if (readyUrl) {
+                        console.log('🎯 发现跳转链接，立即前往...');
+                        await page.goto(readyUrl);
+                        success = true;
+                        break;
+                    }
                 }
             }
-            if (!clicked) throw new Error('tpi.li 按钮未就绪');
+
+            if (!success) {
+                // 最后的兜底：搜索页面内所有的 Pella 链接
+                const backupUrl = await page.evaluate(() => {
+                    const a = Array.from(document.querySelectorAll('a')).find(el => el.href.includes('pella.app/renew'));
+                    return a ? a.href : null;
+                });
+                if (backupUrl) {
+                    console.log('🔗 捕获到备用链接，强制跳转...');
+                    await page.goto(backupUrl);
+                    success = true;
+                }
+            }
+
+            if (!success) throw new Error('tpi.li 破解失败');
         }
 
+        // 5. 验证结果
         await page.waitForURL(/pella\.app\/renew\//, { timeout: 20000 }).catch(() => {});
         if (page.url().includes('/renew/')) {
-            console.log('🎉 续期成功！');
-            await sendTG('✅ 续期成功！');
+            console.log('🎉 续期动作已完成！');
+            await sendTG('✅ 续期动作成功');
         } else {
-            throw new Error('未到达最终续期页面: ' + page.url());
+            throw new Error('未检测到最终续期页面，当前 URL: ' + page.url());
         }
 
     } catch (e) {
         await page.screenshot({ path: 'error.png' });
-        console.error(`❌ 错误: ${e.message}`);
+        console.error(`❌ 错误详情: ${e.message}`);
         await sendTG(`❌ 脚本异常: ${e.message}`);
         throw e;
     } finally {
