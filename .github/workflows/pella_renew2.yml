@@ -1,64 +1,47 @@
-name: 🎮 Pella 自动续期2
+name: Pella Auto Renew (cuty)
+
 on:
-  schedule:
-    - cron: '0 1 * * *' # 每天北京时间上午 9:00
   workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"   # 每6小时跑一次（可改）
 
 jobs:
-  renew:
-    name: 🔄 执行续期
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+
     steps:
-      - name: 📥 拉取代码
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🟢 安装 Node.js
+      - name: 🟢 Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
-          cache: 'npm'
+          node-version: 20
 
-      - name: 📦 安装依赖
-        run: npm install
-
-      - name: 🌐 安装 Playwright 浏览器
-        # 仅安装必要的 chromium，减少无谓的流量消耗
-        run: npx playwright install chromium --with-deps
-
-      - name: 🛡️ 启动 GOST 代理转发
-        # 仅在配置了 Proxy Secret 时运行
-        if: env.GOST_PROXY_RAW != ''
-        env:
-          GOST_PROXY_RAW: ${{ secrets.GOST_PROXY }}
+      - name: 📦 Install dependencies
         run: |
-          # 自动获取最新版本号
-          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-          echo "📦 GOST 版本: $VERSION"
-          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
-          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
-          chmod +x gost
-          # 启动本地 8080 端口转发到远程代理
-          nohup ./gost -L :8080 -F "${{ secrets.GOST_PROXY }}" > gost.log 2>&1 &
-          sleep 5
-          echo "✅ GOST 已启动，测试连通性..."
-          curl -i -s -x http://127.0.0.1:8080 https://api.ipify.org || echo "⚠️ 代理连接测试失败"
+          npm install
+          npx playwright install --with-deps
 
-      - name: 🚀 运行续期脚本
+      - name: 🖥️ Install xdotool (for CF click fallback)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xdotool xvfb
+
+      - name: 🚀 Run Script (with virtual display)
         env:
           PELLA_ACCOUNT: ${{ secrets.PELLA_ACCOUNT }}
-          TG_BOT:        ${{ secrets.TG_BOT }}
-          # 脚本内会检测此变量来决定是否走 http://127.0.0.1:8080
-          GOST_PROXY:    http://127.0.0.1:8080 
+          TG_BOT: ${{ secrets.TG_BOT }}
         run: |
-          # 既然不再使用 xdotool 点击绝对坐标，xvfb-run 其实可以根据需要选配
-          # 如果你的脚本 headless 设为 true，这里直接运行即可
-          npx playwright test tests/pella_renew.spec.js
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+          npx playwright test tests/pella_renew.spec.js --timeout=120000
 
-      - name: 📸 上传截图 (调试用)
-        if: always()
+      - name: 📸 Upload screenshots (on failure)
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
-          path: "*.png"
-          retention-days: 7
+          path: |
+            *.png
+            test-results
