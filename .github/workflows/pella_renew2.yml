@@ -1,4 +1,4 @@
-name: 🎮 Pella 自动续期
+name: 🎮 Pella 自动续期2
 on:
   schedule:
     - cron: '0 1 * * *'
