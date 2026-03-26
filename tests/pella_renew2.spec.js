@@ -169,91 +169,7 @@ function sendTG(result, extra = '') {
     });
 }
 
-// ── xdotool 点击绝对坐标 ────────────────────────────────────
-function xdotoolClick(x, y) {
-    x = Math.round(x);
-    y = Math.round(y);
-    try {
-        const wids = execSync('xdotool search --onlyvisible --class chrome', { timeout: 3000 })
-            .toString().trim().split('\n').filter(Boolean);
-        if (wids.length > 0) {
-            execSync(`xdotool windowactivate ${wids[wids.length - 1]}`, { timeout: 2000, stdio: 'ignore' });
-            execSync('sleep 0.2', { stdio: 'ignore' });
-        }
-        execSync(`xdotool mousemove ${x} ${y}`, { timeout: 2000 });
-        execSync('sleep 0.15', { stdio: 'ignore' });
-        execSync('xdotool click 1', { timeout: 2000 });
-        console.log(`📐 xdotool 点击成功: (${x}, ${y})`);
-        return true;
-    } catch (e) {
-        console.log(`⚠️ xdotool 点击失败或不可用：${e.message}`);
-        return false;
-    }
-}
 
-// ── 获取窗口偏移量 ──────────────────────────────────────────
-async function getWindowOffset(page) {
-    try {
-        const wids = execSync('xdotool search --onlyvisible --class chrome', { timeout: 3000 })
-            .toString().trim().split('\n').filter(Boolean);
-        if (wids.length > 0) {
-            const geo = execSync(`xdotool getwindowgeometry --shell ${wids[wids.length - 1]}`, { timeout: 3000 }).toString();
-            const geoDict = {};
-            geo.trim().split('\n').forEach(line => {
-                const [k, v] = line.split('=');
-                if (k && v) geoDict[k.trim()] = parseInt(v.trim());
-            });
-            const winX = geoDict['X'] || 0;
-            const winY = geoDict['Y'] || 0;
-            const info = await page.evaluate('(function(){ return { outer: window.outerHeight, inner: window.innerHeight }; })()');
-            let toolbar = info.outer - info.inner;
-            if (toolbar < 30 || toolbar > 200) toolbar = 87;
-            return { winX, winY, toolbar };
-        }
-    } catch (e) {}
-    const info = await page.evaluate('(function(){ return { screenX: window.screenX||0, screenY: window.screenY||0, outer: window.outerHeight, inner: window.innerHeight }; })()');
-    let toolbar = info.outer - info.inner;
-    if (toolbar < 30 || toolbar > 200) toolbar = 87;
-    return { winX: info.screenX, winY: info.screenY, toolbar };
-}
-
-// ── CF Turnstile 坐标获取 (增加轮询机制) ──────────────────────
-async function getTurnstileCoords(page) {
-    console.log('⏳ 正在扫描 Turnstile 验证框位置...');
-    // 增加重试机制，最多等待 15 秒（15 * 1000ms）
-    for (let i = 0; i < 15; i++) {
-        const coords = await page.evaluate(`
-            (function(){
-                // 1. 尝试直接查找 cf-turnstile 容器
-                var container = document.querySelector('.cf-turnstile');
-                if (container) {
-                    var rect = container.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                        return { click_x: Math.round(rect.x + 30), click_y: Math.round(rect.y + rect.height / 2) };
-                    }
-                }
-                // 2. 遍历所有 iframe，通过特征识别 Cloudflare 验证框
-                var iframes = document.querySelectorAll('iframe');
-                for (var j = 0; j < iframes.length; j++) {
-                    var src = iframes[j].src || '';
-                    var title = iframes[j].title || '';
-                    if (src.includes('cloudflare') || src.includes('turnstile') || title.includes('Widget containing a Cloudflare security challenge')) {
-                        var rect = iframes[j].getBoundingClientRect();
-                        // 确保元素可见且已渲染
-                        if (rect.width > 20 && rect.height > 20) {
-                            return { click_x: Math.round(rect.x + 30), click_y: Math.round(rect.y + rect.height / 2) };
-                        }
-                    }
-                }
-                return null;
-            })()
-        `);
-        
-        if (coords) return coords;
-        await sleep(1000); // 没找到则等待 1 秒后重试
-    }
-    return null;
-}
 
 // ── CF token 检测 ────────────────────────────────────────────
 async function checkCFToken(page) {
@@ -275,75 +191,59 @@ async function checkCFToken(page) {
 
 // ── 处理 CF Turnstile ────────────────────────────────────────
 async function solveTurnstile(page) {
-    await page.evaluate(`
-        (function() {
-            var turnstileInput = document.querySelector('input[name="cf-turnstile-response"]');
-            if (!turnstileInput) return;
-            var el = turnstileInput;
-            for (var i = 0; i < 20; i++) {
-                el = el.parentElement;
-                if (!el) break;
-                var style = window.getComputedStyle(el);
-                if (style.overflow === 'hidden') el.style.overflow = 'visible';
-                el.style.minWidth = 'max-content';
-            }
-        })()
-    `);
+    console.log('🛡️ 开始处理 Cloudflare Turnstile...');
 
     await page.evaluate(CF_TOKEN_LISTENER_JS);
-    console.log('📡 开始监控 Cloudflare Turnstile Token...');
 
-    if (await checkCFToken(page)) {
-        console.log('✅ 验证已自动通过');
-        return true;
+    // ✅ 等待 iframe 出现
+    let frame = null;
+    for (let i = 0; i < 20; i++) {
+        const frames = page.frames();
+        frame = frames.find(f => f.url().includes('cloudflare'));
+        if (frame) break;
+        await sleep(500);
     }
 
-    // 滚动页面使验证框居中
-    await page.evaluate(`
-        var c = document.querySelector('.cf-turnstile');
-        if (c) c.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    `);
-    
-    // 增加显式等待，防网络卡顿
-    await page.waitForTimeout(2000); 
-
-    const coords = await getTurnstileCoords(page);
-    if (!coords) {
-        console.log('❌ 验证坐标获取失败：未能在规定时间内找到渲染的 iframe');
-        await page.screenshot({ path: 'turnstile_no_coords.png' });
+    if (!frame) {
+        console.log('❌ 未找到 Turnstile iframe');
+        await page.screenshot({ path: 'no_iframe.png' });
         return false;
     }
 
-    const { winX, winY, toolbar } = await getWindowOffset(page);
-    const absX = coords.click_x + winX;
-    const absY = coords.click_y + winY + toolbar;
-    console.log(`📐 坐标计算完成，准备点击相对视口: (${coords.click_x}, ${coords.click_y}) / 绝对屏幕: (${absX}, ${absY})`);
-    
-    // 尝试 xdotool 点击，如果失败则降级使用 Playwright 原生点击
-    const xdotoolSuccess = xdotoolClick(absX, absY);
-    if (!xdotoolSuccess) {
-        console.log('⚠️ 降级使用 Playwright 原生点击...');
+    console.log('✅ 找到 Turnstile iframe');
+
+    // ✅ 尝试 Playwright 点击（最稳）
+    try {
+        const checkbox = await frame.waitForSelector('input[type="checkbox"]', { timeout: 5000 });
+        await checkbox.click({ force: true });
+        console.log('🖱️ 已点击 Turnstile checkbox');
+    } catch (e) {
+        console.log('⚠️ checkbox 不存在，尝试点击 iframe');
         try {
-            await page.mouse.click(coords.click_x, coords.click_y, { delay: 150 });
-            console.log('✅ Playwright 原生点击已触发');
-        } catch (err) {
-            console.log(`❌ 原生点击也失败: ${err.message}`);
-        }
+            const iframeElement = await page.$('iframe[src*="cloudflare"]');
+            await iframeElement.click({ force: true });
+        } catch {}
     }
 
-    // 增加长等待机制，因为某些复杂的 Turnstile 验证需要较长时间生成 Token
-    console.log('⏳ 等待 Token 生成验证...');
+    // ✅ 等待 token
     for (let i = 0; i < 60; i++) {
-        await sleep(1000);
-        if (await checkCFToken(page)) {
-            const token = await page.evaluate('window.__cf_turnstile_token__ || ""');
-            console.log(`✅ Cloudflare Turnstile 验证通过！token：${token.substring(0, 50)}...`);
+        await sleep(500);
+
+        const ok = await page.evaluate(`
+            (function(){
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                return input && input.value && input.value.length > 20;
+            })()
+        `);
+
+        if (ok) {
+            console.log('✅ Turnstile 验证成功');
             return true;
         }
     }
 
-    console.log('❌ 人机验证超时：未能生成有效 Token');
-    await page.screenshot({ path: 'turnstile_fail.png' });
+    console.log('❌ Turnstile 验证失败');
+    await page.screenshot({ path: 'cf_fail.png' });
     return false;
 }
 
@@ -432,7 +332,7 @@ test('Pella 自动续期', async () => {
     // ── 启动浏览器 ───────────────────────────────────────────
     console.log('🔧 启动浏览器...');
     const browser = await chromium.launch({
-        headless: false,
+        headless: ture,
         proxy: proxyConfig,
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
@@ -529,6 +429,7 @@ test('Pella 自动续期', async () => {
         // ── CF Turnstile 验证 ─────────────────────────────────
         const hasTurnstile = await page.evaluate(
             '!!document.querySelector("input[name=\'cf-turnstile-response\']")'
+            '!!document.querySelector('input[name="cf-turnstile-response"]')'
         );
         if (hasTurnstile) {
             console.log('🛡️ 检测到 CF Turnstile，开始处理...');
